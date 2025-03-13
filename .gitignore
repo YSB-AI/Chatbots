@@ -1,0 +1,34 @@
+*.model
+*.pyc
+*.pth
+Virtual_Assistant/chainlit_app/__pycache__/
+Virtual_Assistant/chainlit_app/__pycache__/app.cpython-311.pyc
+Virtual_Assistant/chainlit_app/__pycache__/intelligence.cpython-311.pyc
+Virtual_Assistant/chainlit_app/__pycache__/app.cpython-311.pyc
+*.pdf
+STORAGE
+Virtual_Assistant/chainlit_app/.env
+Virtual_Assistant/chainlit_app/public/.env
+Virtual_Assistant/chainlit_app/archive/*
+
+Virtual_Assistant/notebooks/.env
+Virtual_Assistant/notebooks/experiments.ipynb
+Virtual_Assistant/notebooks/data_processing_and_indexing.ipynb
+Virtual_Assistant/chainlit_app/DOCUMENTS/*
+Virtual_docs_creator_agent/chainlit_app/DOCUMENTS/*
+Virtual_docs_creator_agent/chainlit_app/archive/*
+Virtual_docs_creator_agent/notebooks/.env
+Virtual_docs_creator_agent/chainlit_app/.env
+Virtual_docs_creator_agent/datasets/*
+Virtual_Assistant/datasets/*
+Virtual_docs_creator_agent/chainlit_app/*copy.py
+Virtual_docs_creator_agent/chainlit_app/public/.env
+Virtual_docs_creator_agent/chainlit_app/public/test.py
+Virtual_docs_creator_agent/notebooks/data_processing_and_indexing.ipynb
+Virtual_docs_creator_agent/notebooks/experiments.ipynb
+Virtual_docs_creator_agent/notebooks/Llama-3.1-8B-Instruct/original/params.json
+Virtual_docs_creator_agent copy/chainlit_app/DOCUMENTS/doenças mentais e a sua relacao com a tecnologia.
+
+.txt
+Virtual_docs_creator_agent copy
+Virtual_docs_creator_agent copy
