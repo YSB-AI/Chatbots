@@ -1,96 +1,51 @@
-# GenAI - Virtual Assistant 
+# Virtual Assistant & Intelligent Document Writer
 
 ## Overview
 
-This Virtual Assistant is designed to provide intelligent responses to both general conversational inputs and domain-specific queries related to scientific research. Additionally, it has the capability to generate structured documents following academic paper conventions using a multi-agent system.
+This repository contains two AI-powered projects designed to enhance conversational AI and document generation using advanced retrieval and multi-agent techniques.
 
-## Features
+## Projects
 
-### 1. Conversational Capabilities
+### 1. Virtual Assistant with RAG
 
-The assistant can handle general conversational inputs such as:
+A virtual assistant capable of handling both general conversations and domain-specific queries related to scientific research. Additionally, it can generate structured academic-style documents using a multi-agent system.
 
-"Hello!"
+**Features:**
 
-"How are you?"
+- General conversational capabilities
 
-"Tell me a joke."
+- Domain-specific scientific query handling
 
-Provides a smooth and natural conversational experience.
-
-### 2. Research-Specific Question Answering
-
-Uses Retrieval-Augmented Generation (RAG) to answer questions about:
-
-- Thesis
-
-- Research papers
-
-- Scientific articles
-
-Any question about a specific topic will trigger this feature.
-
-Ensures accurate and contextually relevant responses by relying solely on retrieved information.
-
-### 3. Structured Document Generation
-
-The assistant can generate a research-style document with the following sections :
-
-- Title, Introduction, Abstract
-
-- Body of the document
-
-- Conclusion and References
-
-#### Multi-Agent Implementation Approaches
-
-The multi-agent system delegates different sections of the document to specialized agents, while a supervisor is used to coordinate the multiple agents tasks (Fig. 1).
-
-![Multi-Agents Diagram  ](Virtual_Assistant/images/supervisor-diagram.png)
-Fig. 1 - Multi-Agents Diagram  [https://blog.langchain.dev/langgraph-multi-agent-workflows/]
+- Structured document generation following academic paper conventions
 
 
-The multi-agent system is implemented in two different ways:
 
-1. LangGraph with Ollama (Llama 3.2)
+### 2. Intelligent Document Writer
 
-Leverages LangGraph to create a structured workflow for multi-agent interactions, implementing a Supervisor-Worker model.
+An AI-driven assistant that guides users through creating large documents. Users provide topics, and the system retrieves relevant information, suggests innovative ideas, plans the document structure, generates content for each section, critiques the results against the plan, and exports the final document as a PDF.
 
-Uses Ollama and Llama 3.2 as the underlying language model.
+**Features:**
 
-Ensures seamless communication between the agents handling different sections, while the supervisor coordinates the workflow.
+- User-guided document creation
 
-2. Custom Multi-Agent Implementation
+- Information retrieval and idea generation
 
-Implements a Supervisor-Worker model using Ollama (MFDoom/deepseek-r1-tool-calling:1.5b), with the Supervisor coordinating the workflow and deciding which worker agent to work next.
+- Multi-agent workflow for structured content generation
 
+- Auto-critique and refinement of document sections
 
-**Three Worker Agents handle specific sections:**
+- PDF export of the final document
 
-- Agent 1 : Title, Introduction, and Abstract
+## # 3. Technologies Used
 
-- Agent 2 : Body of the document
+- Ollama models with tool support
 
-- Agent 3 : Conclusion and References
+- LangGraph – Graph-based framework for managing multi-agent workflows
 
-Provides greater flexibility and control over agent interactions, and increase the tokens limits while generating the document.
-
-## Technology Stack
-
-- Ollama (Llama 3.2 and MFDoom/deepseek-r1-tool-calling:1.5b)
-
-- LangGraph – Graph-based framework for managing multi-agent workflows.
-
-- RAG (Retrieval-Augmented Generation) – For answering scientific queries.
+- RAG (Retrieval-Augmented Generation) – Enhancing responses with relevant scientific information
 
 - Python 3
 
-- Chainlit
+- Chainlit – UI for interactive AI applications
 
--  PostgreSQL + pgvector 
-
-# Install dependencies
-pip install -r Virtual_Assistant/chainlit_app/requirements.txt
-
-# Run the assistant
-chainlit run app.py -w
+- PostgreSQL + pgvector – Efficient vector storage for retrieval
