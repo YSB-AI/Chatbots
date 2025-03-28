@@ -36,7 +36,7 @@ An AI-driven assistant that guides users through creating large documents. Users
 
 - PDF export of the final document
 
-## # 3. Technologies Used
+### 3. Technologies Used
 
 - Ollama models with tool support
 
