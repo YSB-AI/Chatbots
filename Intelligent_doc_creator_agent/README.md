@@ -100,7 +100,7 @@ Here you have an example of the planning phase results:
 
 The multi-agent system delegates different sections of the document to specialized agents, while a supervisor is used to coordinate the multiple agents tasks (Fig. 1).
 
-![Multi-Agents Diagram  ](./images/supervisor-diagram.png)
+![Multi-Agents Diagram  ](./images/multiagents_architecture.png)
 Fig. 2 - Multi-Agents Diagram  
 
 The multi-agent system is implemented using langgraph, along with ollama and some models supporting tools and structured output.

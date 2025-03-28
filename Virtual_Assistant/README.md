@@ -46,7 +46,7 @@ The assistant can generate a research-style document with the following sections
 
 The multi-agent system delegates different sections of the document to specialized agents, while a supervisor is used to coordinate the multiple agents tasks (Fig. 1).
 
-![Multi-Agents Diagram  ](./images/multiagents_architecture.png)
+![Multi-Agents Diagram  ](./images/supervisor-diagram.png)
 Fig. 1 - Multi-Agents Diagram  
 
 
