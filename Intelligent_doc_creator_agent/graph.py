@@ -13,7 +13,8 @@ class UserIntentModel(BaseModel):
     rationale : str
 
 class CriticModel(BaseModel):
-    observation : Dict
+    observation : str
+    recommendations : str
     score : int
 
 class DocSectionsModel(BaseModel):
@@ -25,6 +26,7 @@ class DocsPlanningModel(BaseModel):
     doc_title : str
     doc_objective : str
     sections: List[DocSectionsModel]
+    ordered_sections: list
 
 
 class AgentState(TypedDict):

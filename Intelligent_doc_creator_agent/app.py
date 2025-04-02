@@ -29,7 +29,6 @@ sys.path.append('../../')
 hf_token = os.getenv("HF_TOKEN", None) 
 model_id = os.getenv("model_id", None) 
 embed_model_name = os.getenv("embed_model_name", None)
-llama_model_id = os.getenv("llama_model_id", None)
 
 host = os.getenv("host", None)
 user = os.getenv("user", None)
@@ -43,7 +42,6 @@ TOOLS_METHOD  =  os.getenv("TOOLS_METHOD", None)
 conninfo = f"postgresql+asyncpg://{user}:{password}@{host}:5432/chainlit"
 
 tasks_definition = {
-"intent_node": "Getting intent" ,
 "intent_deeper_node" : "Getting deeper intent" ,
 "intent_critic_node" : "Criticizing deeper intent" ,
 "innovation_creator_node" : "Getting Innovation" ,

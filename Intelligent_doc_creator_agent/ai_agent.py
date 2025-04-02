@@ -28,6 +28,7 @@ port = os.getenv("port", None)
 database= os.getenv("database", None)
 table_name= os.getenv("table_name", None)
 decision_agent_model = os.getenv("decision_agent_model", None)
+tool_agent_model = os.getenv("tool_agent_model", None)
 
 class OllamaClient():
     def __init__(self, model, options):
@@ -89,13 +90,7 @@ class AIAgent():
         self.reranker =  LLMRerank(choice_batch_size=20, top_n=20)
 
         graph = StateGraph(AgentState)
-        graph.add_node("intent_node", self.get_intent_node)
         graph.add_node("intent_deeper_node", self.intent_deeper_node)
-        graph.add_conditional_edges("intent_node", self.validate_intent_decision, {
-                True : "intent_deeper_node",
-                False: "conversational_node"
-                }
-            )
 
         graph.add_node("intent_critic_node", self.intent_critic_node)
         graph.add_edge("intent_deeper_node", "intent_critic_node")
@@ -122,10 +117,9 @@ class AIAgent():
             )
 
         graph.add_conditional_edges("intent_critic_node", self.validate_deeper_intent_critic_decision, {
-                "NORMAL" : "conversational_node",
-                "MISSING_TOPIC" : "conversational_node",
-                "SEARCH_INNOVATION" : "innovation_creator_node",
-                "DOC_WRITER" : "doc_creation_planning_node",
+                "NORMAL_CONVERSATION" : "conversational_node",
+                "DOCUMENT_REQUEST_WITH_TOPIC" : "innovation_creator_node",
+                "SELECT_FROM_OPTIONS" : "doc_creation_planning_node",
                 False: "intent_deeper_node"
                 }
             )
@@ -135,9 +129,10 @@ class AIAgent():
                 False: "innovation_creator_node"
                 }
             )
-        graph.set_entry_point("intent_node")
+        graph.set_entry_point("intent_deeper_node")
 
         self.graph = graph.compile(checkpointer=checkpointer)
+        self.tool_agent= OllamaClient(tool_agent_model, options={"temperature": cl.user_session.get("temperature_param"),"num_predict" : 8000})
         self.agent = OllamaClient(decision_agent_model, options={"temperature": cl.user_session.get("temperature_param"),"num_predict" : 8000})
         self.innovation_agent = OllamaClient(decision_agent_model, options={"temperature": cl.user_session.get("temperature_param"),"num_predict" : 8000})
         self.tools_definition = ToolsDefinition()
@@ -146,63 +141,6 @@ class AIAgent():
         self.thread = stream_thread
 
     
-
-    
-    def get_intent_node(self, state: AgentState):
-        """
-        This function is responsible for running the intent node. It takes in a state object and runs the intent node based on the instruction in the state. The instruction can be to ask the user for refinement of its input as it was not clear for you, or to inform the user that you are an agent specialized in guidance for document creation. Be concise.
-
-        The function returns a new state object with the updated messages and the task_list and task_def set to None.
-
-        Parameters
-        ----------
-        state : AgentState
-            The state object containing the instruction and the user's input.
-
-        Returns
-        -------
-        AgentState
-            The updated state object
-        """
-        user_input = state['task']
-        conversation_history =  []
-        most_recent_conversation_history  = cl.user_session.get("most_recent_history")
-        task_list= state.get("task_list", None)
-        task_def= state.get("task_def",None)
-
-        manage_tasks(task_list, task_def, task_running="intent_node",  status = cl.TaskStatus.RUNNING,  )
-
-        print("\n----------------------------")
-        print(f"Getting intent for user's input : {user_input}")
-        print(f"Most recent conversation history : {most_recent_conversation_history}")
-        print(f"Conversation history : {conversation_history}")
-        print("----------------------------")
-
-        if len(conversation_history) == 0:
-            conversation_history.append({"role":"system", "content" : INTENT_PROMPT})
-            
-        prompt = f"""
-        Here you have the conversation history with the user : {most_recent_conversation_history}
-        Here you have the user's input: {user_input}
-        Analyze the inputs carefully and classify the intent.
-        """
-
-        conversation_history.append({"role":"user", "content" : prompt})
-
-        options = {
-                "temperature": 0.6,
-                "num_predict" : 500
-            }
-        response, user_intent = self.agent.chat(conversation_history, format=UserIntentModel, options=options, tools = None)
-        print("response.message.content ->",response.message.content)
-    
-        manage_tasks(task_list, task_def, task_running="intent_node",  status = cl.TaskStatus.DONE)
-
-        return {'intent':  user_intent, 
-            "task_list" : task_list,
-            "task_def" : task_def,
-            }
-
     def intent_deeper_node(self, state: AgentState):
         """
         This function performs a deeper analysis of the user's intent by evaluating various phases 
@@ -227,6 +165,7 @@ class AIAgent():
         task_list= state.get("task_list", None)
         most_recent_conversation_history  = cl.user_session.get("most_recent_history")
         task_def= state.get("task_def",None)
+        message_history  = state.get("messages", None)
 
         manage_tasks(task_list, task_def,task_running="intent_deeper_node", status = cl.TaskStatus.RUNNING , revision_counter = state.get("intent_revision_number"))
 
@@ -234,39 +173,30 @@ class AIAgent():
         print(f"Getting intent deeper analysis for user's input : {user_input}")
         print("----------------------------")
         
-        for phase in INTENT_VERIFICATION_ORDER:
-            print("Running deeper intent classification phase : ",phase)
-            prompt = copy.deepcopy(INTENT_PHASES_PROMPT[phase]["prompt"]).replace("$CONVERSATION_HISTORY$",str(most_recent_conversation_history)).replace("$USER_INPUT$", str(user_input)).replace("$INTENT_CRITIQUE$", str(intent_critic))
-            intent_opt = INTENT_PHASES_PROMPT[phase]["output"]
-            
-            conversation_history.append({"role":"user", "content" : prompt})
-        
-            class IntentResearchCheckModel(BaseModel):
-                output: Literal[*intent_opt]
-                rationale : str
-        
-            options = {
-                "temperature": 0.3,
-                "num_predict" : 500
-            }
-            response, deep_intent = self.agent.chat(conversation_history, format=IntentResearchCheckModel, options=options, tools = None)
-            print(f"Deeper inten analysis phase '{phase}' output -> ",deep_intent)
+        class IntentResearchCheckModel(BaseModel):
+            output: Literal[
+                "NORMAL_CONVERSATION",
+                "DOCUMENT_REQUEST_WITH_TOPIC",
+                "SELECT_FROM_OPTIONS",
+            ]
+            reasoning: str
 
+        prompt = copy.deepcopy(DOCUMENT_INTENT_PROMPT).replace("$CONVERSATION_HISTORY$", str(most_recent_conversation_history)).replace("$USER_INPUT$", str(user_input)).replace("$INTENT_CRITIQUE$", str(intent_critic))
 
-            if deep_intent.output == "NO_LIST_OF_WORKS":
-                conversation_history.append({'role': 'assistant', 'content':  "There is not a list of innovative works in the conversation history."})
+        conversation_history.append({"role":"user", "content" : prompt})
+        message_history.append({"role":"user", "content" : prompt})
 
-            elif deep_intent.output == "LIST_EXISTS":
-                conversation_history.append({'role': 'assistant', 'content':  "There is a list of innovative works in the conversation history."})  
-
-            elif deep_intent.output == "NOT_SELECTING_OPTION":
-                conversation_history.append({'role': 'assistant', 'content':  "The user is NOT selecting a work/option from a provided list of innovative works (provided by the assistant)."})
-            else:
-                break
+        options = {
+            "temperature": 0.1,
+            "num_predict" : 600,
+            "top_p" :0.9
+        }
+        _, deep_intent = self.agent.chat(conversation_history, format=IntentResearchCheckModel, options=options, tools = None)
+        print("Deeper intent analysis output -> ",deep_intent)
 
         conversation_history.append({'role': 'assistant', 'content':  f"**Intent classifier** output : {str(deep_intent)} "})
+        message_history.append({'role': 'assistant', 'content':  f"**Intent classifier** output : {str(deep_intent)} "})
 
-        print("Last deeper analysis on intent critic decision: ",deep_intent)
 
         manage_tasks(task_list, task_def, task_running="intent_deeper_node", status = cl.TaskStatus.DONE, revision_counter = state.get("intent_revision_number"))
         return {
@@ -274,7 +204,8 @@ class AIAgent():
             "intent_revision_number": state.get("intent_revision_number", 1) + 1,
             "intent_history" : conversation_history,
             "task_list" : task_list,
-            "task_def" : task_def
+            "task_def" : task_def,
+            "messages" : message_history
         }
 
 
@@ -299,70 +230,45 @@ class AIAgent():
         """
         print("Getting intent critics for intent deeper analysis ...")
         
-        conversation_history = state.get("intent_history",[])
+        conversation_history = []#state.get("intent_history",[])
         task_list= state.get("task_list", None)
         task_def= state.get("task_def",None)
+        message_history  = state.get("messages", None)
+        user_input  = state.get("task", None)
+        deep_intent= state.get("deep_intent", None)
+        most_recent_conversation_history  = cl.user_session.get("most_recent_history")
 
         manage_tasks(task_list, task_def,task_running="intent_critic_node", status = cl.TaskStatus.RUNNING)
-
-        prompt = f"""{INTENT_CRITIC_PROMPT}
-        Now, perform an in-depth evaluation and provide your critique.
-        """
+        
+        prompt = copy.deepcopy(INTENT_CRITIQUE_PROMPT).replace("$CONVERSATION_HISTORY$", str(most_recent_conversation_history)).replace("$USER_INPUT$", str(user_input))
+        prompt = prompt + f"""
+        Here you have the **Intent classifier** output and reasoning : {str(deep_intent)} 
+        Now, perform an in-depth evaluation and provide your critique."""
         conversation_history.append({"role":"user", "content" : prompt})
+        message_history.append({"role":"user", "content" : prompt})
+        
         options = {
-                "temperature": 0.5,
-                "num_predict" : 500
+
+                "temperature": 0.2,
+                "num_predict" : 1000,
+                "top_p" : 0.9
             }
-        response, intent_critic = self.agent.chat(conversation_history, format=CriticModel, options=options, tools = None)
+        _, intent_critic = self.agent.chat(conversation_history, format=CriticModel, options=options, tools = None)
 
         manage_tasks(task_list, task_def, task_running="intent_critic_node", status = cl.TaskStatus.DONE)
-        conversation_history.append({'role': 'assistant', 'content':  f"**Critiques** for **Intent classifier** : {intent_critic.observation} "})
+        conversation_history.append({'role': 'assistant', 'content':  f"**Critiques** for **Intent classifier** : {intent_critic} "})
+        message_history.append({'role': 'assistant', 'content':  f"**Critiques** for **Intent classifier** : {intent_critic} "})
 
         return {"intent_critic" : {
             "score" : intent_critic.score,
-            "observation" : intent_critic.observation
+            "observation" : intent_critic.observation,
+            "recommendations" : intent_critic.recommendations
         }, 
-            "intent_history" : conversation_history,
             "task_list" : task_list,
-            "task_def" : task_def
+            "task_def" : task_def,
+            "messages" : message_history
         }
 
-    def validate_intent_decision(self, state: AgentState):
-        """
-        Validates the decision for intent analysis based on the intent critic score and intent.
-
-        This function assesses whether the intent, as analyzed by the intent critic, should be accepted or 
-        requires further revision. It takes into consideration the critic's confidence score, the status of the 
-        conversation (resumed or not), and whether the maximum number of intent revisions has been reached.
-
-        Parameters:
-        - state (AgentState): An object representing the current state of the agent, containing information 
-        such as intent critic decision, deep intent, innovation, and revision counts.
-
-        Raises:
-        - Exception: If the intent is missing from the state.
-
-        Returns:
-        - str: The output of the intent if accepted.
-        - bool: False if further revision is required.
-        """
-
-        intent = state.get("intent", None)
-        print("\n----------------------------")
-        print(f"Validating intent decision for intent analysis : {intent}")
-        print("----------------------------")
-        
-        if intent is None :
-            raise Exception("Missing intent ..")
-
-        if state["intent_revision_number"] > state["intent_max_revisions"]:
-            print("Maximum revision reached...")
-            return "NORMAL"
-    
-        if intent.output == "NORMAL":
-            return False  
-        else:
-            return True
 
     def validate_deeper_intent_critic_decision(self, state: AgentState):
 
@@ -390,6 +296,7 @@ class AIAgent():
 
         print("\n----------------------------")
         print(f"Validating the decision for deeper intent critic analysis : {intent_critic_decision}")
+        print(f"Deep intent : {deep_intent}")
         print("----------------------------")
 
         if deep_intent is None :
@@ -398,25 +305,20 @@ class AIAgent():
 
         if state["intent_revision_number"] > state["intent_max_revisions"]:
             print("Maximum revision reached...")
-            return "NORMAL"
+            return "NORMAL_CONVERSATION"
             
         score = float(intent_critic_decision.get("score", 0))
 
-        if score >= 85:  # HIGH CONFIDENCE - Accept the classification as correct
+        if score >= 85.0:  # HIGH CONFIDENCE - Accept the classification as correct
             print(f"High agreement ({score}%), proceeding with deeper intent:", deep_intent.output)
-            
-            # **Special case: DOC_WRITER requires innovation selection**
-            # if deep_intent.output == "DOC_WRITER" and not state.get("innovation"):
-            #     print("DOC_WRITER intent detected, but no innovation was selected. Rejecting.")
-            #     return False  # Force revision
 
             return deep_intent.output
 
-        elif 50 <= score < 85:  # MEDIUM CONFIDENCE - Could be correct, but needs more checks
+        elif 50.0 <= score < 74.0:  # MEDIUM CONFIDENCE - Could be correct, but needs more checks
             print(f"Medium agreement ({score}%). Checking if revisions are needed...")
 
             # **Handle borderline cases: Accept with constraints**
-            if (cl.user_session.get("resumed_conversation") == False and deep_intent.output in ["SEARCH_INNOVATION"] and not state.get("innovation")) or (cl.user_session.get("resumed_conversation") == False and deep_intent.output in ["DOC_WRITER"] and state.get("innovation")) or (cl.user_session.get("resumed_conversation") == True):
+            if  (deep_intent.output in ["NORMAL_CONVERSATION"]) or (cl.user_session.get("resumed_conversation") == False and deep_intent.output in ["DOCUMENT_REQUEST_WITH_TOPIC"] and not state.get("innovation")) or (cl.user_session.get("resumed_conversation") == True):
                 print("Intent involves innovation, allowing progression.")
                 return deep_intent.output
 
@@ -460,43 +362,16 @@ class AIAgent():
         final_doc = state.get("final_doc", {})
 
         manage_tasks(task_list, task_def,task_running="conversational_node", status = cl.TaskStatus.RUNNING)
-
-
-        if intent is None :
-            raise Exception("Missing intent ..")
-        elif  user_input is None:
-            raise Exception("Missing user input ..")
-
-        prompt = f"""You are a conversational agent that will interact with a user. You will receive a users's input, the conversation history (if any) and an instruction .
-        Your task is to follow strictly the instruction.
-        Here you have the user's input : {user_input}",
-        """
         
-        if deep_intent is not None:
-            if deep_intent.output =="MISSING_TOPIC" or deep_intent.output.find('MISSING_TOPIC') != -1:
-                prompt = prompt + f"\nThe user wants to create a document but the topic is missing. Ask explicitly for the topic of the document to be created. Be concise"
-
-            elif deep_intent.output =="SEARCH_INNOVATION" or deep_intent.output.find('SEARCH_INNOVATION') != -1:
-                innovation = state.get("innovation", None)
-                prompt = f"""Present the following innovative works ans ask the user to select one of them : {innovation}."""
-            
-            elif deep_intent.output =="DOC_WRITER" or deep_intent.output.find('DOC_WRITER') != -1:
-                prompt = f"""Summarize the created work: {final_doc}."""
-
-            elif intent.output == "NORMAL" or intent.output.find('NORMAL') != -1:
-                prompt = prompt +f"\n Inform the user that you are an agent specifialized in guidance for document creation. Be concise."
-            
-            else:
-                prompt = prompt +"\nAsk the user for refinement of its input as it was not clear for you."
-        else:
-            if intent.output == "NORMAL" or intent.output.find('NORMAL') != -1:
-                prompt = prompt +f"\n Inform the user that you are an agent specifialized in guidance for document creation. Be concise."
-            
-            else:
-                prompt = prompt +"\nAsk the user for refinement of its input as it was not clear for you."
+        prompt = copy.deepcopy(CONVERSATIONAL_PROMPT).replace("$USER_INPUT$", user_input)
+      
+        try:
+            prompt = prompt + "\n"+INTENT_TRACKING[deep_intent.output]
+        except Exception as e:
+            print(f"Sometime failed while preparing the output for the user. {e}")
+            prompt = prompt + "\nAsk the user for refinement of its input as it was not clear for you."
 
         prompt = prompt + f"\nOutput only the response without your any extra comments or explanation and using the language {cl.user_session.get('language')}"
-        
         message_history.append({"role":"user", "content" : prompt})
 
         response, _ = self.agent.chat(message_history, format=None, tools = None)
@@ -573,7 +448,8 @@ class AIAgent():
         innovation_revision_number = state.get("innovation_revision_number", None)
         task_list= state.get("task_list", None)
         task_def= state.get("task_def",None)
-        search_result = state.get("search_result",None)
+        message_history  = state.get("messages", None)
+
 
 
         manage_tasks(task_list, task_def,task_running="innovation_creator_node", status = cl.TaskStatus.RUNNING, revision_counter=  innovation_revision_number)
@@ -583,7 +459,7 @@ class AIAgent():
             ]
         if len(conversation_history) == 0 :
             conversation_history.append({"role":"system", "content" : INNOVATION_SYSTEM_PROMPT})
-     
+            message_history.append({"role":"user", "content" : INNOVATION_SYSTEM_PROMPT})
         inputs = f"""
         - User input : {user_input}
         - **Consider the user's critique and evaluation** (`{innovation_critic}`) to refine your output.
@@ -592,10 +468,11 @@ class AIAgent():
         """
 
         conversation_history.append({"role":"user", "content" : inputs})
+        message_history.append({"role":"user", "content" : inputs})
 
         for i in range(30):#Sometimes the ollama model output is broken , that's why we have this loop
    
-            response, _ = self.innovation_agent.chat(conversation_history, format=None, tools = tools_list)
+            response, _ = self.tool_agent.chat(conversation_history, format=None, tools = tools_list)
 
             output = ""
             topics = None
@@ -611,6 +488,7 @@ class AIAgent():
                 if i ==0:
                     conversation_history.append(response.message)
                     conversation_history.append({"role":"user", "content" : "You FAILED to call the tool 'retrieve_data_tool'. **This is mantadory as you need to call it to get data for innovation creation.** Make sure to call the tool. "})
+
             else:
                 break
 
@@ -646,10 +524,13 @@ class AIAgent():
                 print("Calling the agent again")
                 conversation_history.append(response.message)
                 conversation_history.append({'role': 'tool', 'content': str(output), 'name': tool.function.name})
+                
+
             
-            response, _ = self.innovation_agent.chat(conversation_history, format=None, tools = tools_list)
+            response, _ = self.tool_agent.chat(conversation_history, format=None, tools = tools_list)
 
         conversation_history.append({'role': 'assistant', 'content':  f" Output :  {response.message.content}"})
+        message_history.append({"role":"assistant", "content" : f" Output :  {response.message.content}.\n"})
         manage_tasks(task_list, task_def, task_running="innovation_creator_node", status = cl.TaskStatus.DONE)
 
         print("Identified topics : ", topics)
@@ -662,7 +543,8 @@ class AIAgent():
             "task_list" : task_list,
             "task_def" : task_def,
             "sources" : sources_elements,
-            "search_result" : str_sources
+            "search_result" : str_sources,
+            "messages" : message_history
         }
 
     def get_innovation_works(self, topics, sources, innovation_critic, str_sources):
@@ -712,6 +594,7 @@ class AIAgent():
         task_def= state.get("task_def",None)
         search_result = state.get("search_result",None)
         manage_tasks(task_list, task_def,task_running="innovation_creator_critic_node", status = cl.TaskStatus.RUNNING)
+        message_history  = state.get("messages", None)
 
         print("\n----------------------------")
         print(f"Getting innovation critics for : {innovation}")
@@ -722,8 +605,11 @@ class AIAgent():
         
         prompt = INNOVATION_CRITIC_PROMPT.replace("$SEARCH_RESULT$",search_result)
         conversation_history.append({'role': 'user','content': prompt })
-        response, innovative_works_critics = self.agent.chat(conversation_history, format=CriticModel, tools = None)
+        message_history.append({'role': 'user','content': prompt })
+
+        _, innovative_works_critics = self.agent.chat(conversation_history, format=CriticModel, tools = None)
         conversation_history.append({'role': 'assistant', 'content':  f"Critics for the innovative works and its creation process : {str(innovative_works_critics.observation)} "})
+        message_history.append({'role': 'assistant', 'content': f"Critics for the innovative works and its creation process : {str(innovative_works_critics.observation)} "})
 
         manage_tasks(task_list, task_def, task_running="innovation_creator_critic_node", status = cl.TaskStatus.DONE)
 
@@ -733,7 +619,8 @@ class AIAgent():
         }, 
             "innovation_history" :conversation_history,
             "task_list" : task_list,
-            "task_def" : task_def
+            "task_def" : task_def,
+            "messages" : message_history
         }
        
     def validate_innovation_critic_decision(self, state: AgentState):
@@ -805,6 +692,7 @@ class AIAgent():
                 "objective" : section.section_objective,
                 "subsections" : section.subsections
             })
+        print("Document sections ordered : ", planning_formated_output.ordered_sections)
         print("Document selected : ", planning_formated_output.doc_title)
         print("Document selected objectives : ", planning_formated_output.doc_objective)
         print("Plan sections formatted -> ", planning)
@@ -826,7 +714,8 @@ class AIAgent():
             "task_def" : task_def,
             "doc_details": {"planning": planning,
                             "doc_title" : planning_formated_output.doc_title,
-                            "doc_objective" : planning_formated_output.doc_objective
+                            "doc_objective" : planning_formated_output.doc_objective,
+                            "ordered_sections" : planning_formated_output.ordered_sections
             },
             "sources" : sources_elements,
             "search_result" : str_sources
@@ -886,6 +775,8 @@ class AIAgent():
         doc_supervisor_history.append({"role":"user", "content" : prompt})
 
         available_sections = ["FINISH"]
+
+        print(f"Order sections : {doc_details['ordered_sections']}")
         for details in doc_details["planning"]:
             if details["title"] in sections_review_control:
                 try:
@@ -932,7 +823,7 @@ class AIAgent():
         print(f"Supervisor output : '{router.next_section}' with objectives '{router.objectives}' ")
 
         if router.next_section == "FINISH":
-            for details in doc_details["planning"]:
+            for details in doc_details['ordered_sections']:
                 if details["title"] in doc_supervisor_outputs:
                     final_doc = final_doc + doc_supervisor_outputs[details["title"]]['results']+"\n\n"
 
@@ -959,8 +850,6 @@ class AIAgent():
                 print("Document creation finished")
 
                 self.graph.update_state(self.thread, {
-                    "innovation_revision_number": 1,
-                    "intent_revision_number": 1,
                     "innovation_history" : [],
                     "intent_history" : [],
                     "sources" : [],
