@@ -29,7 +29,6 @@ sys.path.append('../../')
 hf_token = os.getenv("HF_TOKEN", None) 
 model_id = os.getenv("model_id", None) 
 embed_model_name = os.getenv("embed_model_name", None)
-llama_model_id = os.getenv("llama_model_id", None)
 
 host = os.getenv("host", None)
 user = os.getenv("user", None)
@@ -43,7 +42,6 @@ TOOLS_METHOD  =  os.getenv("TOOLS_METHOD", None)
 conninfo = f"postgresql+asyncpg://{user}:{password}@{host}:5432/chainlit"
 
 tasks_definition = {
-"intent_node": "Getting intent" ,
 "intent_deeper_node" : "Getting deeper intent" ,
 "intent_critic_node" : "Criticizing deeper intent" ,
 "innovation_creator_node" : "Getting Innovation" ,
@@ -207,6 +205,9 @@ async def start():
         stream_thread = stream_thread
     )
     cl.user_session.set("agent", agent)
+        
+    # except Exception as e:
+    #     print("Erro init variables: ", e)
 
     # Settings
     settings = await cl.ChatSettings(
@@ -571,6 +572,8 @@ async def main(message: cl.Message):
                                             except Exception as e:
                                                 print(f"Failed to retrieve the token {token}. {e}")
                                         
+                        
+
     except Exception as e:
         print("Failed to run the stream : ",e)
         print("Task running : ",task_running)
@@ -582,6 +585,8 @@ async def main(message: cl.Message):
         task_list.status = "Failed"
         await cl.sleep(0.2)
         await task_list.send()
+
+    
 
     sources_update(sources)
     context = cl.user_session.get("answer_sources")[int(len(cl.user_session.get("conversation_history")))]
@@ -597,6 +602,7 @@ async def main(message: cl.Message):
         "innovation_revision_number": 1,
         "intent_revision_number": 1,
         "innovation_history" : [],
+        #"intent_history" : [],
         "sources" : [],
         "search_result" : "",
         "doc_planning" : "",

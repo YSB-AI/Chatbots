@@ -19,6 +19,8 @@ import operator
 import time
 import unicodedata
 import json
+from graph import *
+
 host = os.getenv("host", None)
 user = os.getenv("user", None)
 password = os.getenv("password", None)
@@ -27,67 +29,53 @@ database= os.getenv("database", None)
 table_name= os.getenv("table_name", None)
 decision_agent_model = os.getenv("decision_agent_model", None)
 tool_agent_model = os.getenv("tool_agent_model", None)
-llama_model_id = os.getenv("llama_model_id", None)
 
+class OllamaClient():
+    def __init__(self, model, options):
+        self.model = model
+        self.client = ollama.Client()
+        self.options = options
 
-intent_options = ["NORMAL", "DOCUMENTS"]
+    def chat(
+        self, 
+        messages, 
+        format=None, 
+        options=None, tools = None
+        ):
+        
+        if options is None:
+            options = self.options
 
-class UserIntentModel(BaseModel):
-    output: Literal[*intent_options]
-    rationale : str
+        if tools is None:
+            tools = []
+  
+        format_output = None
 
-class CriticModel(BaseModel):
-    observation : Dict
-    score : int
+        for _ in range(3): #Sometimes the ollama model output is broken , that's why we have this loop
+            try:
+                if format is None:
+                
+                    response = self.client.chat(
+                        model=self.model,
+                        messages=messages,
+                        options=options,
+                        tools = tools
+                    )
+                else:
+                    response = self.client.chat(
+                        model=self.model,
+                        messages=messages,
+                        format=format.model_json_schema(),
+                        options=options,
+                        tools = tools
+                    )
 
-class DocSectionsModel(BaseModel):
-    title : str
-    section_objective : str
-    subsections: dict  
+                    format_output = format.model_validate_json(response.message.content)
 
-class DocsPlanningModel(BaseModel):
-    doc_title : str
-    doc_objective : str
-    sections: List[DocSectionsModel]
-
-class AgentState(TypedDict):
-    messages: Annotated[list[AnyMessage], operator.add]
-    task : str
-    intent : dict
-    deep_intent : dict
-    intent_history : list
-    intent_critic: dict
-    
-    topics : str
-    innovation: str
-    innovation_critic : str
-    innovation_history : list
-
-    intent_revision_number: int
-    intent_max_revisions: int
-
-    innovation_revision_number: int
-    innovation_max_revisions: int
-
-    doc_planning : str
-    doc_details : dict
-
-    doc_supervisor_history : list
-    doc_supervisor_outputs: dict
-    docs_written_sections : list
-
-    task_list: cl.TaskList
-    task_def : dict
-
-    sources : list
-    search_result : str
-
-    sections_review_control : dict
-    sections_max_review : int
-
-    final_doc : str
-    doc_title : str
-
+                return response, format_output
+            except Exception as e:
+                print(f"Ollama API error: {e}")
+                 # Or raise a custom exception
 
 class AIAgent():
     def __init__(
@@ -98,30 +86,27 @@ class AIAgent():
             **kwargs
             ):
 
+            
         self.reranker =  LLMRerank(choice_batch_size=20, top_n=20)
-        self.extra_params = kwargs
-        self.info_provided = False
-        self.innovative_works_cache = None
 
         graph = StateGraph(AgentState)
-        graph.add_node("intent_node", self.get_intent_node)
         graph.add_node("intent_deeper_node", self.intent_deeper_node)
-        graph.add_conditional_edges("intent_node", self.validate_intent_decision, {
-                True : "intent_deeper_node",
-                False: "conversational_node"
-                }
-            )
 
         graph.add_node("intent_critic_node", self.intent_critic_node)
         graph.add_edge("intent_deeper_node", "intent_critic_node")
+
         graph.add_node("conversational_node", self.conversational_node)
         graph.add_edge("conversational_node", END)
+
         graph.add_node("innovation_creator_node", self.innovation_creator_node)
         graph.add_node("innovation_creator_critic_node", self.innovation_creator_critic_node)
         graph.add_edge("innovation_creator_node", "innovation_creator_critic_node")
+
         graph.add_node("doc_creation_planning_node", self.doc_creation_planning_node)
         graph.add_node("doc_supervisor_node", self.doc_supervisor_node)
         graph.add_edge("doc_creation_planning_node", "doc_supervisor_node")
+
+
         graph.add_node("doc_writer_node", self.doc_writer_node)
         graph.add_edge("doc_writer_node", "doc_supervisor_node")
 
@@ -132,10 +117,9 @@ class AIAgent():
             )
 
         graph.add_conditional_edges("intent_critic_node", self.validate_deeper_intent_critic_decision, {
-                "NORMAL" : "conversational_node",
-                "MISSING_TOPIC" : "conversational_node",
-                "SEARCH_INNOVATION" : "innovation_creator_node",
-                "DOC_WRITER" : "doc_creation_planning_node",
+                "NORMAL_CONVERSATION" : "conversational_node",
+                "DOCUMENT_REQUEST_WITH_TOPIC" : "innovation_creator_node",
+                "SELECT_FROM_OPTIONS" : "doc_creation_planning_node",
                 False: "intent_deeper_node"
                 }
             )
@@ -145,220 +129,174 @@ class AIAgent():
                 False: "innovation_creator_node"
                 }
             )
-        graph.set_entry_point("intent_node")
+        graph.set_entry_point("intent_deeper_node")
 
         self.graph = graph.compile(checkpointer=checkpointer)
-        self.agent = Client()
-        self.innovation_agent = Client()
-        self.avaluator_agent = Client()
+        self.tool_agent= OllamaClient(tool_agent_model, options={"temperature": cl.user_session.get("temperature_param"),"num_predict" : 8000})
+        self.agent = OllamaClient(decision_agent_model, options={"temperature": cl.user_session.get("temperature_param"),"num_predict" : 8000})
+        self.innovation_agent = OllamaClient(decision_agent_model, options={"temperature": cl.user_session.get("temperature_param"),"num_predict" : 8000})
         self.tools_definition = ToolsDefinition()
+
         self.retriever = retriever
         self.thread = stream_thread
 
-    def manage_tasks(self, task_list, task_def, task_running, status, revision_counter = None):
-
-        task_json = task_def[task_running]
-        
-        if task_list is not None and len(task_list.tasks) > 0:
-            
-            task_id = list(task_json)[0]
-            task_list.tasks[task_id].status = status
     
-            if revision_counter is not None and revision_counter >1: 
-                task_list.tasks[task_id].title = task_json[task_id] + f" (Revision {revision_counter})"
+    def intent_deeper_node(self, state: AgentState):
+        """
+        This function performs a deeper analysis of the user's intent by evaluating various phases 
+        of intent classification. It checks for specific criteria in the conversation history and 
+        user input to determine the appropriate classification and output.
 
-    
-    def get_intent_node(self, state: AgentState):
-        user_input = state['task']
-        conversation_history =  []
-        most_recent_conversation_history  = cl.user_session.get("most_recent_history")
-        task_list= state.get("task_list", None)
-        task_def= state.get("task_def",None)
+        Parameters:
+        - state (AgentState): An object representing the current state of the agent, containing 
+        information such as user input, intent history, intent critic, and task details.
 
-        self.manage_tasks(task_list, task_def, task_running="intent_node",  status = cl.TaskStatus.RUNNING,  )
+        Returns:
+        - dict: A dictionary containing the deep intent classification, updated intent revision 
+        number, intent history, and task details.
 
-        print("\n----------------------------")
-        print(f"Getting intent for user's input : {user_input}")
-        print(f"Most recent conversation history : {most_recent_conversation_history}")
-        print(f"Conversation history : {conversation_history}")
-        print("----------------------------")
-
-        if len(conversation_history) == 0:
-            conversation_history.append({"role":"system", "content" : INTENT_PROMPT})
-            
-        prompt = f"""
-        Here you have the conversation history with the user : {most_recent_conversation_history}
-        Here you have the user's input: {user_input}
-        Analyze the inputs carefully and classify the intent.
+        The function manages the task status, prints debug information, and handles exceptions 
+        during the intent analysis process.
         """
 
-        conversation_history.append({"role":"user", "content" : prompt})
-        for _ in range(3): #Sometimes the ollama model output is broken , that's why we have this loop
-            response = self.agent.chat(
-                messages=conversation_history,
-                model=decision_agent_model,
-                format=UserIntentModel.model_json_schema(),
-                options = {
-                        "temperature": 0.3,
-                        "num_predict" : 500
-                    }
-            )
-            try:
-                user_intent = UserIntentModel.model_validate_json(response.message.content)
-                break
-            except Exception as e:
-                print(f"Failed to format intent output. ",e)
-
-
-        self.manage_tasks(task_list, task_def, task_running="intent_node",  status = cl.TaskStatus.DONE)
-
-        return {'intent':  user_intent, 
-            "task_list" : task_list,
-            "task_def" : task_def,
-            }
-
-    def intent_deeper_node(self, state: AgentState):
-        
         user_input  = state.get("task", None)
         conversation_history = state.get("intent_history",[])
         intent_critic = state.get('intent_critic', {})
         task_list= state.get("task_list", None)
         most_recent_conversation_history  = cl.user_session.get("most_recent_history")
         task_def= state.get("task_def",None)
+        message_history  = state.get("messages", None)
 
-        self.manage_tasks(task_list, task_def,task_running="intent_deeper_node", status = cl.TaskStatus.RUNNING , revision_counter = state.get("intent_revision_number"))
+        manage_tasks(task_list, task_def,task_running="intent_deeper_node", status = cl.TaskStatus.RUNNING , revision_counter = state.get("intent_revision_number"))
 
         print("\n----------------------------")
         print(f"Getting intent deeper analysis for user's input : {user_input}")
         print("----------------------------")
         
-        for phase in INTENT_VERIFICATION_ORDER:
-            print("Running deeper intent classification phase : ",phase)
-            prompt = copy.deepcopy(INTENT_PHASES_PROMPT[phase]["prompt"]).replace("$CONVERSATION_HISTORY$",str(most_recent_conversation_history)).replace("$USER_INPUT$", str(user_input)).replace("$INTENT_CRITIQUE$", str(intent_critic))
-            intent_opt = INTENT_PHASES_PROMPT[phase]["output"]
-            
-            conversation_history.append({"role":"user", "content" : prompt})
-        
-            class IntentResearchCheckModel(BaseModel):
-                output: Literal[*intent_opt]
-                rationale : str
+        class IntentResearchCheckModel(BaseModel):
+            output: Literal[
+                "NORMAL_CONVERSATION",
+                "DOCUMENT_REQUEST_WITH_TOPIC",
+                "SELECT_FROM_OPTIONS",
+            ]
+            reasoning: str
 
-            for _ in range(3): #Sometimes the ollama model output is broken , that's why we have this loop
-                try:
-                        
-                    response = self.avaluator_agent.chat(
-                        messages=conversation_history,
-                        model=decision_agent_model,
-                        format=IntentResearchCheckModel.model_json_schema(),
-                        options = {
-                            "temperature": 0.3,
-                            "num_predict" : 500
-                        }
-                    )
-                    deep_intent = IntentResearchCheckModel.model_validate_json(response.message.content)
-                    print(f"Deeper inten analysis phase '{phase}' output -> ",deep_intent)
+        prompt = copy.deepcopy(DOCUMENT_INTENT_PROMPT).replace("$CONVERSATION_HISTORY$", str(most_recent_conversation_history)).replace("$USER_INPUT$", str(user_input)).replace("$INTENT_CRITIQUE$", str(intent_critic))
 
-                    break
-                except Exception as e:
-                    print("Error validating intent critic decision: ",e) 
+        conversation_history.append({"role":"user", "content" : prompt})
+        message_history.append({"role":"user", "content" : prompt})
 
-
-            if deep_intent.output == "NO_LIST_OF_WORKS":
-                conversation_history.append({'role': 'assistant', 'content':  "There is not a list of innovative works in the conversation history."})
-
-            elif deep_intent.output == "LIST_EXISTS":
-                conversation_history.append({'role': 'assistant', 'content':  "There is a list of innovative works in the conversation history."})  
-
-            elif deep_intent.output == "NOT_SELECTING_OPTION":
-                conversation_history.append({'role': 'assistant', 'content':  "The user is NOT selecting a work/option from a provided list of innovative works (provided by the assistant)."})
-            else:
-                break
+        options = {
+            "temperature": 0.1,
+            "num_predict" : 600,
+            "top_p" :0.9
+        }
+        _, deep_intent = self.agent.chat(conversation_history, format=IntentResearchCheckModel, options=options, tools = None)
+        print("Deeper intent analysis output -> ",deep_intent)
 
         conversation_history.append({'role': 'assistant', 'content':  f"**Intent classifier** output : {str(deep_intent)} "})
+        message_history.append({'role': 'assistant', 'content':  f"**Intent classifier** output : {str(deep_intent)} "})
 
-        print("Last deeper analysis on intent critic decision: ",deep_intent)
 
-        self.manage_tasks(task_list, task_def, task_running="intent_deeper_node", status = cl.TaskStatus.DONE, revision_counter = state.get("intent_revision_number"))
+        manage_tasks(task_list, task_def, task_running="intent_deeper_node", status = cl.TaskStatus.DONE, revision_counter = state.get("intent_revision_number"))
         return {
             "deep_intent" : deep_intent,
             "intent_revision_number": state.get("intent_revision_number", 1) + 1,
             "intent_history" : conversation_history,
             "task_list" : task_list,
-            "task_def" : task_def
+            "task_def" : task_def,
+            "messages" : message_history
         }
 
 
     def intent_critic_node(self, state: AgentState):
+        """
+        This function validates the decision for deeper intent critic analysis based on the intent critic score and deeper intent.
+
+        This function assesses whether the deeper intent, as analyzed by the intent critic, should be accepted or 
+        requires further revision. It takes into consideration the critic's confidence score, the status of the 
+        conversation (resumed or not), and whether the maximum number of intent revisions has been reached.
+
+        Parameters:
+        - state (AgentState): An object representing the current state of the agent, containing information 
+        such as intent critic decision, deep intent, innovation, and revision counts.
+
+        Raises:
+        - Exception: If the deep intent is missing from the state.
+
+        Returns:
+        - str: The output of the deep intent if accepted.
+        - bool: False if further revision is required.
+        """
         print("Getting intent critics for intent deeper analysis ...")
         
-        conversation_history = state.get("intent_history",[])
+        conversation_history = []#state.get("intent_history",[])
         task_list= state.get("task_list", None)
         task_def= state.get("task_def",None)
+        message_history  = state.get("messages", None)
+        user_input  = state.get("task", None)
+        deep_intent= state.get("deep_intent", None)
+        most_recent_conversation_history  = cl.user_session.get("most_recent_history")
 
-        self.manage_tasks(task_list, task_def,task_running="intent_critic_node", status = cl.TaskStatus.RUNNING)
+        manage_tasks(task_list, task_def,task_running="intent_critic_node", status = cl.TaskStatus.RUNNING)
+        
+        prompt = copy.deepcopy(INTENT_CRITIQUE_PROMPT).replace("$CONVERSATION_HISTORY$", str(most_recent_conversation_history)).replace("$USER_INPUT$", str(user_input))
+        prompt = prompt + f"""
+        Here you have the **Intent classifier** output and reasoning : {str(deep_intent)} 
+        Now, perform an in-depth evaluation and provide your critique."""
+        conversation_history.append({"role":"user", "content" : prompt})
+        message_history.append({"role":"user", "content" : prompt})
+        
+        options = {
 
+                "temperature": 0.2,
+                "num_predict" : 1000,
+                "top_p" : 0.9
+            }
+        _, intent_critic = self.agent.chat(conversation_history, format=CriticModel, options=options, tools = None)
 
-        for _ in range(3): #Sometimes the ollama model output is broken , that's why we have this loop
-            try:
-               
-                prompt = f"""{INTENT_CRITIC_PROMPT}
-                Now, perform an in-depth evaluation and provide your critique.
-                """
-                conversation_history.append({"role":"user", "content" : prompt})
-
-                response = self.avaluator_agent.chat(
-                    messages=conversation_history,
-                    model=decision_agent_model,
-                    format=CriticModel.model_json_schema(),
-                    options = {
-                        "temperature": 0.5,
-                        "num_predict" : 500
-                    }
-                )
-            
-                intent_critic = CriticModel.model_validate_json(response.message.content)
-                break
-            except Exception as e:
-                print(f"Error validating intent critic decision :{response.message.content}. \n{e}") 
-
-        self.manage_tasks(task_list, task_def, task_running="intent_critic_node", status = cl.TaskStatus.DONE)
-        conversation_history.append({'role': 'assistant', 'content':  f"**Critiques** for **Intent classifier** : {intent_critic.observation} "})
+        manage_tasks(task_list, task_def, task_running="intent_critic_node", status = cl.TaskStatus.DONE)
+        conversation_history.append({'role': 'assistant', 'content':  f"**Critiques** for **Intent classifier** : {intent_critic} "})
+        message_history.append({'role': 'assistant', 'content':  f"**Critiques** for **Intent classifier** : {intent_critic} "})
 
         return {"intent_critic" : {
             "score" : intent_critic.score,
-            "observation" : intent_critic.observation
+            "observation" : intent_critic.observation,
+            "recommendations" : intent_critic.recommendations
         }, 
-            "intent_history" : conversation_history,
             "task_list" : task_list,
-            "task_def" : task_def
+            "task_def" : task_def,
+            "messages" : message_history
         }
 
-    def validate_intent_decision(self, state: AgentState):
-
-        intent = state.get("intent", None)
-        print("\n----------------------------")
-        print(f"Validating intent decision for intent analysis : {intent}")
-        print("----------------------------")
-        
-        if intent is None :
-            raise Exception("Missing intent ..")
-
-        if state["intent_revision_number"] > state["intent_max_revisions"]:
-            print("Maximum revision reached...")
-            return "NORMAL"
-    
-        if intent.output == "NORMAL":
-            return False  
-        else:
-            return True
 
     def validate_deeper_intent_critic_decision(self, state: AgentState):
+
+        """
+        Validates the decision for deeper intent critic analysis based on the intent critic score and deeper intent.
+
+        This function assesses whether the deeper intent, as analyzed by the intent critic, should be accepted or 
+        requires further revision. It takes into consideration the critic's confidence score, the status of the 
+        conversation (resumed or not), and whether the maximum number of intent revisions has been reached.
+
+        Parameters:
+        - state (AgentState): An object representing the current state of the agent, containing information 
+        such as intent critic decision, deep intent, innovation, and revision counts.
+
+        Raises:
+        - Exception: If the deep intent is missing from the state.
+
+        Returns:
+        - str: The output of the deep intent if accepted.
+        - bool: False if further revision is required.
+        """
 
         intent_critic_decision = state.get("intent_critic", {})
         deep_intent = state.get("deep_intent", None)
 
         print("\n----------------------------")
         print(f"Validating the decision for deeper intent critic analysis : {intent_critic_decision}")
+        print(f"Deep intent : {deep_intent}")
         print("----------------------------")
 
         if deep_intent is None :
@@ -367,25 +305,20 @@ class AIAgent():
 
         if state["intent_revision_number"] > state["intent_max_revisions"]:
             print("Maximum revision reached...")
-            return "NORMAL"
+            return "NORMAL_CONVERSATION"
             
         score = float(intent_critic_decision.get("score", 0))
 
-        if score >= 85:  # HIGH CONFIDENCE - Accept the classification as correct
+        if score >= 85.0:  # HIGH CONFIDENCE - Accept the classification as correct
             print(f"High agreement ({score}%), proceeding with deeper intent:", deep_intent.output)
-            
-            # **Special case: DOC_WRITER requires innovation selection**
-            # if deep_intent.output == "DOC_WRITER" and not state.get("innovation"):
-            #     print("DOC_WRITER intent detected, but no innovation was selected. Rejecting.")
-            #     return False  # Force revision
 
             return deep_intent.output
 
-        elif 50 <= score < 85:  # MEDIUM CONFIDENCE - Could be correct, but needs more checks
+        elif 50.0 <= score < 74.0:  # MEDIUM CONFIDENCE - Could be correct, but needs more checks
             print(f"Medium agreement ({score}%). Checking if revisions are needed...")
 
             # **Handle borderline cases: Accept with constraints**
-            if (cl.user_session.get("resumed_conversation") == False and deep_intent.output in ["SEARCH_INNOVATION"] and not state.get("innovation")) or (cl.user_session.get("resumed_conversation") == False and deep_intent.output in ["DOC_WRITER"] and state.get("innovation")) or (cl.user_session.get("resumed_conversation") == True):
+            if  (deep_intent.output in ["NORMAL_CONVERSATION"]) or (cl.user_session.get("resumed_conversation") == False and deep_intent.output in ["DOCUMENT_REQUEST_WITH_TOPIC"] and not state.get("innovation")) or (cl.user_session.get("resumed_conversation") == True):
                 print("Intent involves innovation, allowing progression.")
                 return deep_intent.output
 
@@ -398,6 +331,25 @@ class AIAgent():
 
 
     def conversational_node(self, state: AgentState):
+        """
+        This function is responsible for running the conversational node. It takes in a state object 
+        and runs the conversational node based on the instruction in the state. The instruction can be 
+        to ask the user for refinement of its input as it was not clear for you, or to inform the user 
+        that you are an agent specialized in guidance for document creation. Be concise.
+
+        The function returns a new state object with the updated messages and the task_list and task_def 
+        set to None.
+
+        Parameters
+        ----------
+        state : AgentState
+            The state object containing the instruction and the user's input.
+
+        Returns
+        -------
+        AgentState
+            The updated state object
+        """
         print( "Conversational node...")
 
         intent  = state.get("intent", None)
@@ -409,53 +361,22 @@ class AIAgent():
         source= state.get("sources", [])
         final_doc = state.get("final_doc", {})
 
-        self.manage_tasks(task_list, task_def,task_running="conversational_node", status = cl.TaskStatus.RUNNING)
-
-
-        if intent is None :
-            raise Exception("Missing intent ..")
-        elif  user_input is None:
-            raise Exception("Missing user input ..")
-
-        prompt = f"""You are a conversational agent that will interact with a user. You will receive a users's input, the conversation history (if any) and an instruction .
-        Your task is to follow strictly the instruction.
-        Here you have the user's input : {user_input}",
-        """
+        manage_tasks(task_list, task_def,task_running="conversational_node", status = cl.TaskStatus.RUNNING)
         
-        if deep_intent is not None:
-            if deep_intent.output =="MISSING_TOPIC" or deep_intent.output.find('MISSING_TOPIC') != -1:
-                prompt = prompt + f"\nThe user wants to create a document but the topic is missing. Ask explicitly for the topic of the document to be created. Be concise"
-
-            elif deep_intent.output =="SEARCH_INNOVATION" or deep_intent.output.find('SEARCH_INNOVATION') != -1:
-                innovation = state.get("innovation", None)
-                prompt = f"""Present the following innovative works ans ask the user to select one of them : {innovation}."""
-            
-            elif deep_intent.output =="DOC_WRITER" or deep_intent.output.find('DOC_WRITER') != -1:
-                prompt = f"""Summarize the created work: {final_doc}."""
-
-            elif intent.output == "NORMAL" or intent.output.find('NORMAL') != -1:
-                prompt = prompt +f"\n Inform the user that you are an agent specifialized in guidance for document creation. Be concise."
-            
-            else:
-                prompt = prompt +"\nAsk the user for refinement of its input as it was not clear for you."
-        else:
-            if intent.output == "NORMAL" or intent.output.find('NORMAL') != -1:
-                prompt = prompt +f"\n Inform the user that you are an agent specifialized in guidance for document creation. Be concise."
-            
-            else:
-                prompt = prompt +"\nAsk the user for refinement of its input as it was not clear for you."
+        prompt = copy.deepcopy(CONVERSATIONAL_PROMPT).replace("$USER_INPUT$", user_input)
+      
+        try:
+            prompt = prompt + "\n"+INTENT_TRACKING[deep_intent.output]
+        except Exception as e:
+            print(f"Sometime failed while preparing the output for the user. {e}")
+            prompt = prompt + "\nAsk the user for refinement of its input as it was not clear for you."
 
         prompt = prompt + f"\nOutput only the response without your any extra comments or explanation and using the language {cl.user_session.get('language')}"
-        
         message_history.append({"role":"user", "content" : prompt})
 
-        response = self.agent.chat(
-            messages=message_history,
-            model=llama_model_id,
-            
-        )
+        response, _ = self.agent.chat(message_history, format=None, tools = None)
 
-        self.manage_tasks(task_list, task_def,task_running="conversational_node", status = cl.TaskStatus.DONE)
+        manage_tasks(task_list, task_def,task_running="conversational_node", status = cl.TaskStatus.DONE)
 
         return {'messages': [{
                     'role': 'assistant',
@@ -468,6 +389,20 @@ class AIAgent():
 
     def retrieve_chunks(self,  query : str):
         
+        """
+        This function takes a query string and uses the retriever to find the most 
+        relevant chunks of text from the knowledge base. It filters out chunks with a
+        score lower than 0.3 and returns the selected chunks as a string, a list of 
+        sources_elements to be presented to the user, and the list of sources.
+
+        Parameters:
+        query (str): the query string
+
+        Returns:
+        str: the selected chunks as a string
+        list: the list of sources_elements to be presented to the user
+        list: the list of sources
+        """
         sources =  []
         ids_retrieved = []
         sources_elements = []
@@ -492,6 +427,19 @@ class AIAgent():
 
 
     def innovation_creator_node(self, state: AgentState):
+        """
+        Node responsible for generating innovative works based on user input.
+
+        This node uses the innovation agent to generate innovative works based on user input and the conversation history.
+        The node will also consider the user's critique and evaluation to refine its output.
+
+        The node will also retrieve relevant data using the `retrieve_data_tool` if the tool is called with a valid topic.
+
+        The node will append the output of the agent to the conversation history and update the task list with the new task status.
+
+        :param state: The state of the conversation.
+        :return: The updated state of the conversation.
+        """
         print("\nInnovationg creator node ...")
 
         user_input  = state.get("task", None)
@@ -500,17 +448,18 @@ class AIAgent():
         innovation_revision_number = state.get("innovation_revision_number", None)
         task_list= state.get("task_list", None)
         task_def= state.get("task_def",None)
-        search_result = state.get("search_result",None)
+        message_history  = state.get("messages", None)
 
 
-        self.manage_tasks(task_list, task_def,task_running="innovation_creator_node", status = cl.TaskStatus.RUNNING, revision_counter=  innovation_revision_number)
+
+        manage_tasks(task_list, task_def,task_running="innovation_creator_node", status = cl.TaskStatus.RUNNING, revision_counter=  innovation_revision_number)
   
         tools_list = [
             self.tools_definition.retrieve_data_olama_tool(), 
             ]
         if len(conversation_history) == 0 :
             conversation_history.append({"role":"system", "content" : INNOVATION_SYSTEM_PROMPT})
-     
+            message_history.append({"role":"user", "content" : INNOVATION_SYSTEM_PROMPT})
         inputs = f"""
         - User input : {user_input}
         - **Consider the user's critique and evaluation** (`{innovation_critic}`) to refine your output.
@@ -519,19 +468,11 @@ class AIAgent():
         """
 
         conversation_history.append({"role":"user", "content" : inputs})
+        message_history.append({"role":"user", "content" : inputs})
 
         for i in range(30):#Sometimes the ollama model output is broken , that's why we have this loop
-
-            response = self.innovation_agent.chat(
-                    model= llama_model_id ,
-                    messages= conversation_history,
-                    tools = tools_list,
-                    options = {
-                        "temperature": cl.user_session.get("temperature_param"),
-                        "num_predict" : 8000,
-                    },
-                    
-                )
+   
+            response, _ = self.tool_agent.chat(conversation_history, format=None, tools = tools_list)
 
             output = ""
             topics = None
@@ -547,6 +488,7 @@ class AIAgent():
                 if i ==0:
                     conversation_history.append(response.message)
                     conversation_history.append({"role":"user", "content" : "You FAILED to call the tool 'retrieve_data_tool'. **This is mantadory as you need to call it to get data for innovation creation.** Make sure to call the tool. "})
+
             else:
                 break
 
@@ -582,15 +524,14 @@ class AIAgent():
                 print("Calling the agent again")
                 conversation_history.append(response.message)
                 conversation_history.append({'role': 'tool', 'content': str(output), 'name': tool.function.name})
+                
+
             
-            response = self.innovation_agent.chat(
-                decision_agent_model, 
-                messages=conversation_history,
-                tools = tools_list
-                )
+            response, _ = self.tool_agent.chat(conversation_history, format=None, tools = tools_list)
 
         conversation_history.append({'role': 'assistant', 'content':  f" Output :  {response.message.content}"})
-        self.manage_tasks(task_list, task_def, task_running="innovation_creator_node", status = cl.TaskStatus.DONE)
+        message_history.append({"role":"assistant", "content" : f" Output :  {response.message.content}.\n"})
+        manage_tasks(task_list, task_def, task_running="innovation_creator_node", status = cl.TaskStatus.DONE)
 
         print("Identified topics : ", topics)
         print("----------------------------")
@@ -602,21 +543,28 @@ class AIAgent():
             "task_list" : task_list,
             "task_def" : task_def,
             "sources" : sources_elements,
-            "search_result" : str_sources
+            "search_result" : str_sources,
+            "messages" : message_history
         }
 
     def get_innovation_works(self, topics, sources, innovation_critic, str_sources):
+        """
+        Node responsible for generating innovative works based on user input and conversation history.
 
+        The node generates a prompt for the innovation agent to generate innovative works based on user input and the conversation history.
+        The node will also consider the user's critique and evaluation to refine its output.
+
+        The node will append the output of the agent to the conversation history and update the task list with the new task status.
+
+        :param topics: The topics for the innovation.
+        :param sources: The sources for the innovation.
+        :param innovation_critic: The user's critique and evaluation to refine the output.
+        :param str_sources: The search result.
+        :return: The output of the agent.
+        """
         innovation_prompt = copy.deepcopy(INNOVATION_TOOL_PROMPT)
         innovation_prompt = innovation_prompt.replace("$TOPICS$", str(topics)).replace("$SEARCH_RESULTS$", "\n".join(sources)).replace("$CRITIC_CONVERSATION_HISTORY$", str(innovation_critic))
-        response = self.innovation_agent.chat(
-                model=decision_agent_model,#tool_agent_model,
-                messages= [{"role":"user", "content" : innovation_prompt}],
-                options = {
-                    "temperature": cl.user_session.get("temperature_param"),
-                    "num_predict" : 8000
-                }
-            )
+        response, _ = self.innovation_agent.chat([{"role":"user", "content" : innovation_prompt}], format=None, tools = None)
 
         output = f"""Here you have the topics : {str(topics)}
         Here you have the search result : {str_sources}
@@ -625,14 +573,28 @@ class AIAgent():
         return output
 
     def innovation_creator_critic_node(self, state: AgentState):
-        
+        """
+        Node responsible for generating innovation critics based on user input and conversation history.
+
+        The node generates a prompt for the innovation agent to generate innovation critics based on user input and the conversation history.
+        The node will also consider the user's critique and evaluation to refine its output.
+
+        The node will append the output of the agent to the conversation history and update the task list with the new task status.
+
+        :param innovation: The innovation to be evaluated.
+        :param conversation_history: The conversation history.
+        :param task_list: The task list.
+        :param task_def: The task definition.
+        :param search_result: The search result.
+        :return: The output of the agent.
+        """
         innovation = state.get("innovation", None)
         conversation_history  = state.get("innovation_history", [])
         task_list= state.get("task_list", None)
         task_def= state.get("task_def",None)
         search_result = state.get("search_result",None)
-
-        self.manage_tasks(task_list, task_def,task_running="innovation_creator_critic_node", status = cl.TaskStatus.RUNNING)
+        manage_tasks(task_list, task_def,task_running="innovation_creator_critic_node", status = cl.TaskStatus.RUNNING)
+        message_history  = state.get("messages", None)
 
         print("\n----------------------------")
         print(f"Getting innovation critics for : {innovation}")
@@ -641,22 +603,15 @@ class AIAgent():
         if innovation is None :
             raise Exception("Missing innovation ..")
         
-    
         prompt = INNOVATION_CRITIC_PROMPT.replace("$SEARCH_RESULT$",search_result)
-
         conversation_history.append({'role': 'user','content': prompt })
+        message_history.append({'role': 'user','content': prompt })
 
-        response = self.avaluator_agent.chat(
-            messages=conversation_history,
-            model=decision_agent_model, #tool_agent_model,
-            format=CriticModel.model_json_schema(),
-        )
-
-        innovative_works_critics = CriticModel.model_validate_json(response.message.content)
-
+        _, innovative_works_critics = self.agent.chat(conversation_history, format=CriticModel, tools = None)
         conversation_history.append({'role': 'assistant', 'content':  f"Critics for the innovative works and its creation process : {str(innovative_works_critics.observation)} "})
+        message_history.append({'role': 'assistant', 'content': f"Critics for the innovative works and its creation process : {str(innovative_works_critics.observation)} "})
 
-        self.manage_tasks(task_list, task_def, task_running="innovation_creator_critic_node", status = cl.TaskStatus.DONE)
+        manage_tasks(task_list, task_def, task_running="innovation_creator_critic_node", status = cl.TaskStatus.DONE)
 
         return {"innovation_critic" : {
             "observation" : innovative_works_critics.observation,
@@ -664,11 +619,26 @@ class AIAgent():
         }, 
             "innovation_history" :conversation_history,
             "task_list" : task_list,
-            "task_def" : task_def
+            "task_def" : task_def,
+            "messages" : message_history
         }
        
     def validate_innovation_critic_decision(self, state: AgentState):
         
+        """
+        Validates the decision made by the innovation critic based on the score and revision number.
+
+        This function checks if the innovation critic's score is above a threshold or if the number of
+        revisions has exceeded the maximum allowed. If either condition is met, it returns True,
+        indicating that the innovation critic decision is valid. Otherwise, it returns False.
+
+        Parameters:
+        state (AgentState): The current state containing the innovation critic decision and revision details.
+
+        Returns:
+        bool: True if the decision is valid, False otherwise.
+        """
+
         innovation_critic_decision = state.get("innovation_critic", {})
         print("\n----------------------------")
         print(f"Validating innovation critic decision : {innovation_critic_decision}")
@@ -681,6 +651,21 @@ class AIAgent():
             return False
     
     def doc_creation_planning_node(self, state: AgentState):
+        """
+        This function is responsible for generating a document creation plan based on the user's input.
+        It takes in a state object and generates a document creation plan using the provided user input.
+        The function returns a new state object with the updated messages, the document creation plan and the task_list and task_def set to None.
+
+        Parameters
+        ----------
+        state : AgentState
+            The state object containing the user's input and the conversation history.
+
+        Returns
+        -------
+        AgentState
+            The updated state object
+        """
         print("Document creation planning node ...")
 
         messages  = state.get("messages", [])
@@ -689,27 +674,16 @@ class AIAgent():
         task_def= state.get("task_def",None)
         planning= state.get("planning",{})
 
-
-        self.manage_tasks(task_list, task_def,task_running="doc_creation_planning_node", status = cl.TaskStatus.RUNNING)
-        
+        manage_tasks(task_list, task_def,task_running="doc_creation_planning_node", status = cl.TaskStatus.RUNNING)
         prompt = DOC_PLANNING_PROMPT.replace("$CONVERSATION_HISTORY$", str(messages)).replace("$USER_INPUT$", str(user_input)) 
 
-        for _ in range(3):#Sometimes the ollama model output is broken , that's why we have this loop
-            try:
-                response = self.agent.chat(
-                    messages=[{
-                    'role': 'user',
-                    'content': prompt,
-                    }],
-                    model=decision_agent_model,
-                    format=DocsPlanningModel.model_json_schema(),
-                )
-                planning_formated_output = DocsPlanningModel.model_validate_json(response.message.content)
-                break
-            except Exception as e:
-                    print("Planning node response : ",response.message.content)
-                    print(f"""Error in doc_creation_planning_node : {e}""")
+        conversation_history = [{
+            'role': 'user',
+            'content': prompt,
+            }]
+        response, planning_formated_output = self.agent.chat(conversation_history, format=DocsPlanningModel, tools = None)
 
+        print("Complete response : ",response.message.content)
 
         planning = []
         for i ,section in enumerate(planning_formated_output.sections):
@@ -718,6 +692,7 @@ class AIAgent():
                 "objective" : section.section_objective,
                 "subsections" : section.subsections
             })
+        print("Document sections ordered : ", planning_formated_output.ordered_sections)
         print("Document selected : ", planning_formated_output.doc_title)
         print("Document selected objectives : ", planning_formated_output.doc_objective)
         print("Plan sections formatted -> ", planning)
@@ -725,7 +700,7 @@ class AIAgent():
         print("Updating the search result for this work  ...")
         str_sources, sources_elements, sources = self.retrieve_chunks(planning_formated_output.doc_title+" : "+ planning_formated_output.doc_objective)
 
-        self.manage_tasks(task_list, task_def, task_running="doc_creation_planning_node", status = cl.TaskStatus.DONE)
+        manage_tasks(task_list, task_def, task_running="doc_creation_planning_node", status = cl.TaskStatus.DONE)
 
         return {
             "messages" : [
@@ -739,13 +714,30 @@ class AIAgent():
             "task_def" : task_def,
             "doc_details": {"planning": planning,
                             "doc_title" : planning_formated_output.doc_title,
-                            "doc_objective" : planning_formated_output.doc_objective
+                            "doc_objective" : planning_formated_output.doc_objective,
+                            "ordered_sections" : planning_formated_output.ordered_sections
             },
             "sources" : sources_elements,
             "search_result" : str_sources
         }
 
     def doc_supervisor_node(self, state: AgentState):
+        """
+        This function is responsible for supervising the document creation process.
+
+        It takes in a state object and generates a prompt based on the current state of the document creation process.
+        The function returns a new state object with the updated messages, the document creation plan and the task_list and task_def set to None.
+
+        Parameters
+        ----------
+        state : AgentState
+            The state object containing the user's input and the conversation history.
+
+        Returns
+        -------
+        AgentState
+            The updated state object
+        """
         print("Document supervisor node ...")
 
         doc_planning  = state.get("doc_planning", None)
@@ -758,7 +750,7 @@ class AIAgent():
         doc_supervisor_outputs = state.get("doc_supervisor_outputs", {})
         final_doc = state.get("final_doc", "")
 
-        self.manage_tasks(task_list, task_def,task_running="doc_supervisor_node", status = cl.TaskStatus.RUNNING)
+        manage_tasks(task_list, task_def,task_running="doc_supervisor_node", status = cl.TaskStatus.RUNNING)
 
         if len(doc_supervisor_history) == 0:
             system_prompt = copy.deepcopy(DOC_SUPERVISOR_PROMPT)
@@ -783,15 +775,15 @@ class AIAgent():
         doc_supervisor_history.append({"role":"user", "content" : prompt})
 
         available_sections = ["FINISH"]
+
+        print(f"Order sections : {doc_details['ordered_sections']}")
         for details in doc_details["planning"]:
             if details["title"] in sections_review_control:
                 try:
                     print(f" {details['title']} -> {sections_review_control[details['title']]}/{sections_max_review}")
                     if sections_review_control[details["title"]] < sections_max_review:
                         available_sections.append(details["title"])
-                    # else:
-                    #     final_doc = final_doc + doc_supervisor_outputs[details["title"]]['results']+"\n\n"
-
+ 
                 except Exception as e:
                     print(f"Failed to append/evaluate {details['title']} final doc : {e}")
                     print("doc_supervisor_outputs : ",doc_supervisor_outputs)
@@ -807,17 +799,7 @@ class AIAgent():
             subsections : str
             observation : str
 
-        for _ in range(3):#Sometimes the ollama model output is broken , that's why we have this loop
-            try:
-                response =  self.agent.chat(
-                        model=decision_agent_model,
-                        messages= doc_supervisor_history,
-                        format=Router.model_json_schema(),
-                    )
-                router = Router.model_validate_json(response.message.content)
-
-            except Exception as e:
-                print(f"""Error in doc_supervisor_node : {e}""")
+        response, router = self.agent.chat(doc_supervisor_history, format=Router, tools = None)
 
         output_content = f"""
         Next section to be written : {router.next_section}
@@ -827,6 +809,7 @@ class AIAgent():
         """
 
         doc_supervisor_history.append({"role": "assistant", "content":  output_content})
+        
 
         if "next_section" in doc_supervisor_outputs:
             if last_section_id in doc_supervisor_outputs:
@@ -840,11 +823,11 @@ class AIAgent():
         print(f"Supervisor output : '{router.next_section}' with objectives '{router.objectives}' ")
 
         if router.next_section == "FINISH":
-            for details in doc_details["planning"]:
+            for details in doc_details['ordered_sections']:
                 if details["title"] in doc_supervisor_outputs:
                     final_doc = final_doc + doc_supervisor_outputs[details["title"]]['results']+"\n\n"
 
-        self.manage_tasks(task_list, task_def, task_running="doc_supervisor_node", status = cl.TaskStatus.DONE)
+        manage_tasks(task_list, task_def, task_running="doc_supervisor_node", status = cl.TaskStatus.DONE)
 
         return {
             "doc_supervisor_history" : doc_supervisor_history,
@@ -857,7 +840,9 @@ class AIAgent():
         }
 
     def evaluate_doc_content(self, state: AgentState):
-        
+        """
+        Evaluate if the document creation process has finished. If so, reset the state by setting back the default values for the corresponding variables.
+        """
         doc_supervisor_outputs = state.get("doc_supervisor_outputs", {})
 
         if "next_section" in doc_supervisor_outputs:
@@ -865,8 +850,6 @@ class AIAgent():
                 print("Document creation finished")
 
                 self.graph.update_state(self.thread, {
-                    "innovation_revision_number": 1,
-                    "intent_revision_number": 1,
                     "innovation_history" : [],
                     "intent_history" : [],
                     "sources" : [],
@@ -881,12 +864,20 @@ class AIAgent():
                     "topics" : ""
                     })
     
+
                 return False
         
         return True
 
         
     def doc_writer_node(self, state: AgentState):
+        """
+        This node is responsible for writing a section of the document based on the objectives and observations provided by the doc supervisor.
+        The node will be called multiple times until the document is finished.
+        The node will be given the section_id of the section to be written and the objectives and observations of the section.
+        The node should use the objectives and observations to generate the best section as possible.
+        The node should return the written section and the updated conversation history.
+        """
         print("Doc writer node ...")
         doc_supervisor_outputs = state.get("doc_supervisor_outputs", {})
         docs_written_sections = state.get("docs_written_sections", [])
@@ -895,7 +886,7 @@ class AIAgent():
         search_result = state.get("search_result",None)
         sections_review_control = state.get("sections_review_control", {})
 
-        self.manage_tasks(task_list, task_def,task_running="doc_writer_node", status = cl.TaskStatus.RUNNING)
+        manage_tasks(task_list, task_def,task_running="doc_writer_node", status = cl.TaskStatus.RUNNING)
 
         section_id  = doc_supervisor_outputs['next_section']
         doc_writer_history = section_id+"_history"
@@ -919,12 +910,7 @@ class AIAgent():
 
         # Let's keep the writer history apart from the supervisor's history so that the conversation history will not become too long
         doc_supervisor_outputs[doc_writer_history].append({"role": "user", "content":  prompt})
-
-        response =  self.agent.chat(
-                model=decision_agent_model,
-                messages= doc_supervisor_outputs[doc_writer_history]
-            )
-
+        response, _ = self.agent.chat(doc_supervisor_outputs[doc_writer_history], format=None, tools = None)
         print("\n----------------------------")
         print(f"{section_id} Output :  {response.message.content}")
         print("----------------------------")
@@ -945,7 +931,7 @@ class AIAgent():
         else:
             sections_review_control[section_id] = 1
 
-        self.manage_tasks(task_list, task_def, task_running="doc_writer_node", status = cl.TaskStatus.DONE)
+        manage_tasks(task_list, task_def, task_running="doc_writer_node", status = cl.TaskStatus.DONE)
         return {
             "doc_supervisor_outputs" : doc_supervisor_outputs,
             "docs_written_sections" : docs_written_sections,
@@ -957,6 +943,14 @@ class AIAgent():
 
 #=== Receives a List of chainlit elements and appends it
 def sources_update(elements):
+    """
+    Appends a list of elements to the list of sources stored in the user's session.
+    
+    Parameters
+    ----------
+    elements : list
+        A list of elements to be appended to the list of sources.
+    """
     answer_sources = cl.user_session.get("answer_sources")
     answer_sources.append(elements)
     cl.user_session.set("answer_sources", answer_sources)
@@ -964,6 +958,14 @@ def sources_update(elements):
 #=== Receives a Chainlit Message and appends it
 def update_conversation_history(msg):
 
+    """
+    Appends a Chainlit Message to the conversation history and resume history stored in the user's session.
+    
+    Parameters
+    ----------
+    msg : Chainlit Message
+        The message to be appended to the conversation history.
+    """
     conversation_history = cl.user_session.get("conversation_history")
     conversation_history.append(msg)
     cl.user_session.set("conversation_history", conversation_history)
