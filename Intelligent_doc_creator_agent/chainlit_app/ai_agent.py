@@ -77,6 +77,31 @@ class OllamaClient():
                 print(f"Ollama API error: {e}")
                  # Or raise a custom exception
 
+
+    def chat_with_tool(self, conversation_history, tools_list):
+
+        tools_successfully_called = False
+        for i in range(30):#Sometimes the ollama model output is broken , that's why we have this loop
+            try:
+                response, _ = self.chat(conversation_history,tools = tools_list)
+                if not response.message.tool_calls :
+                    print("Retrying innovation because no retrieval was triggered.")
+                    if i ==0:
+                        conversation_history.append(response.message)
+                        conversation_history.append({"role":"user", "content" : RETRIEVER_TOOL_FAILED_MESSAGE })
+                        time.sleep(1)
+                else:
+                    tools_successfully_called = True
+                    break
+            except Exception as e:
+                print(f"Ollama API error: {e}")
+        
+        if tools_successfully_called:
+            return response, conversation_history
+        return None, None
+
+
+
 class AIAgent():
     def __init__(
             self,
@@ -106,7 +131,6 @@ class AIAgent():
         graph.add_node("doc_supervisor_node", self.doc_supervisor_node)
         graph.add_edge("doc_creation_planning_node", "doc_supervisor_node")
 
-
         graph.add_node("doc_writer_node", self.doc_writer_node)
         graph.add_edge("doc_writer_node", "doc_supervisor_node")
 
@@ -134,11 +158,14 @@ class AIAgent():
         self.graph = graph.compile(checkpointer=checkpointer)
         self.tool_agent= OllamaClient(tool_agent_model, options={"temperature": cl.user_session.get("temperature_param"),"num_predict" : 8000})
         self.agent = OllamaClient(decision_agent_model, options={"temperature": cl.user_session.get("temperature_param"),"num_predict" : 8000})
-        self.innovation_agent = OllamaClient(decision_agent_model, options={"temperature": cl.user_session.get("temperature_param"),"num_predict" : 8000})
+        #self.innovation_agent = OllamaClient(decision_agent_model, options={"temperature": cl.user_session.get("temperature_param"),"num_predict" : 8000})
         self.tools_definition = ToolsDefinition()
 
         self.retriever = retriever
         self.thread = stream_thread
+        self.tools_list = [
+            self.tools_definition.retrieve_data_olama_tool(), 
+            ]
 
     
     def intent_deeper_node(self, state: AgentState):
@@ -180,20 +207,29 @@ class AIAgent():
                 "SELECT_FROM_OPTIONS",
             ]
             reasoning: str
+        
+        if len(conversation_history) == 0:
+            conversation_history.append({"role":"system", "content" : DOCUMENT_INTENT_SYSTEM_PROMPT})
 
         prompt = copy.deepcopy(DOCUMENT_INTENT_PROMPT).replace("$CONVERSATION_HISTORY$", str(most_recent_conversation_history)).replace("$USER_INPUT$", str(user_input)).replace("$INTENT_CRITIQUE$", str(intent_critic))
-
         conversation_history.append({"role":"user", "content" : prompt})
-        message_history.append({"role":"user", "content" : prompt})
+        message_history.append({"role":"user", "content" : copy.deepcopy(DOCUMENT_INTENT_SYSTEM_PROMPT)+ "\n " +prompt})
+        print("\n------------------------")
+        print("Intent prompt : ",prompt)
+        print("------------------------")
 
-        options = {
-            "temperature": 0.1,
-            "num_predict" : 600,
-            "top_p" :0.9
-        }
-        _, deep_intent = self.agent.chat(conversation_history, format=IntentResearchCheckModel, options=options, tools = None)
+        _, deep_intent = self.agent.chat(
+            conversation_history, 
+            format=IntentResearchCheckModel,
+            options={
+                "temperature": 0.1,
+                "num_predict" : 600,
+                "top_p" :0.9
+            }, 
+            tools = None
+            )
+        
         print("Deeper intent analysis output -> ",deep_intent)
-
         conversation_history.append({'role': 'assistant', 'content':  f"**Intent classifier** output : {str(deep_intent)} "})
         message_history.append({'role': 'assistant', 'content':  f"**Intent classifier** output : {str(deep_intent)} "})
 
@@ -240,20 +276,20 @@ class AIAgent():
 
         manage_tasks(task_list, task_def,task_running="intent_critic_node", status = cl.TaskStatus.RUNNING)
         
-        prompt = copy.deepcopy(INTENT_CRITIQUE_PROMPT).replace("$CONVERSATION_HISTORY$", str(most_recent_conversation_history)).replace("$USER_INPUT$", str(user_input))
-        prompt = prompt + f"""
-        Here you have the **Intent classifier** output and reasoning : {str(deep_intent)} 
-        Now, perform an in-depth evaluation and provide your critique."""
+        prompt = copy.deepcopy(INTENT_CRITIQUE_PROMPT).replace("$CONVERSATION_HISTORY$", str(most_recent_conversation_history)).replace("$USER_INPUT$", str(user_input)).replace("$INTENT_CLASSIFIER_OUTPUT$", str(deep_intent))
         conversation_history.append({"role":"user", "content" : prompt})
         message_history.append({"role":"user", "content" : prompt})
         
-        options = {
-
+        _, intent_critic = self.agent.chat(
+            conversation_history, 
+            format=CriticModel, 
+            options={
                 "temperature": 0.2,
                 "num_predict" : 1000,
                 "top_p" : 0.9
-            }
-        _, intent_critic = self.agent.chat(conversation_history, format=CriticModel, options=options, tools = None)
+            }, 
+            tools = None
+            )
 
         manage_tasks(task_list, task_def, task_running="intent_critic_node", status = cl.TaskStatus.DONE)
         conversation_history.append({'role': 'assistant', 'content':  f"**Critiques** for **Intent classifier** : {intent_critic} "})
@@ -309,21 +345,13 @@ class AIAgent():
             
         score = float(intent_critic_decision.get("score", 0))
 
-        if score >= 85.0:  # HIGH CONFIDENCE - Accept the classification as correct
-            print(f"High agreement ({score}%), proceeding with deeper intent:", deep_intent.output)
-
+        if score >= 60.0:  # HIGH CONFIDENCE - Accept the classification as correct
+            if cl.user_session.get("resumed_conversation") == False and deep_intent.output == "DOC_WRITER" and not state.get("innovation"):
+                print("DOC_WRITER intent detected, but no innovation was selected. Rejecting.")
+                return False  # Force revision
+            
+            print(f"High agreement ({score}%), proceeding with deeper intent:", deep_intent.output)# **Special case: DOC_WRITER requires innovation selection**
             return deep_intent.output
-
-        elif 50.0 <= score < 74.0:  # MEDIUM CONFIDENCE - Could be correct, but needs more checks
-            print(f"Medium agreement ({score}%). Checking if revisions are needed...")
-
-            # **Handle borderline cases: Accept with constraints**
-            if  (deep_intent.output in ["NORMAL_CONVERSATION"]) or (cl.user_session.get("resumed_conversation") == False and deep_intent.output in ["DOCUMENT_REQUEST_WITH_TOPIC"] and not state.get("innovation")) or (cl.user_session.get("resumed_conversation") == True):
-                print("Intent involves innovation, allowing progression.")
-                return deep_intent.output
-
-            print("Unclear decision, requesting revision...")
-            return False  # Request another review
 
         else:  #  LOW CONFIDENCE - Model is unsure, revision is needed
             print(f"Low agreement ({score}%), rejecting deeper intent. Reverting to intent_node...")
@@ -352,14 +380,12 @@ class AIAgent():
         """
         print( "Conversational node...")
 
-        intent  = state.get("intent", None)
         deep_intent = state.get("deep_intent", None)
         user_input  = state.get("task", None)
         message_history  = state.get("messages", None)
         task_list= state.get("task_list", None)
         task_def= state.get("task_def",None)
         source= state.get("sources", [])
-        final_doc = state.get("final_doc", {})
 
         manage_tasks(task_list, task_def,task_running="conversational_node", status = cl.TaskStatus.RUNNING)
         
@@ -375,13 +401,11 @@ class AIAgent():
         message_history.append({"role":"user", "content" : prompt})
 
         response, _ = self.agent.chat(message_history, format=None, tools = None)
+        message_history.append({"role":"assistant", "content" : response.message.content})
 
         manage_tasks(task_list, task_def,task_running="conversational_node", status = cl.TaskStatus.DONE)
 
-        return {'messages': [{
-                    'role': 'assistant',
-                    'content': response.message.content
-                }],
+        return {'messages': message_history,
             "task_list" : task_list,
             "task_def" : task_def  ,
             "sources" : source}
@@ -449,55 +473,40 @@ class AIAgent():
         task_list= state.get("task_list", None)
         task_def= state.get("task_def",None)
         message_history  = state.get("messages", None)
-
-
+        str_sources=""
+        sources =  []
+        sources_elements = state.get("sources", [])
+        output = ""
+        topics = None
 
         manage_tasks(task_list, task_def,task_running="innovation_creator_node", status = cl.TaskStatus.RUNNING, revision_counter=  innovation_revision_number)
   
-        tools_list = [
-            self.tools_definition.retrieve_data_olama_tool(), 
-            ]
         if len(conversation_history) == 0 :
             conversation_history.append({"role":"system", "content" : INNOVATION_SYSTEM_PROMPT})
             message_history.append({"role":"user", "content" : INNOVATION_SYSTEM_PROMPT})
         inputs = f"""
         - User input : {user_input}
-        - **Consider the user's critique and evaluation** (`{innovation_critic}`) to refine your output.
+        - **Consider the user's critique and evaluation** (`{str(innovation_critic)}`) to refine your output.
         - **Use the language:** `{cl.user_session.get('language')}` for the final output.
 
         """
-
         conversation_history.append({"role":"user", "content" : inputs})
         message_history.append({"role":"user", "content" : inputs})
 
-        for i in range(30):#Sometimes the ollama model output is broken , that's why we have this loop
-   
-            response, _ = self.tool_agent.chat(conversation_history, format=None, tools = tools_list)
 
-            output = ""
-            topics = None
-            
-            print("List of tools : ", response.message.tool_calls)
-            str_sources=""
-            sources =  []
-            sources_elements = state.get("sources", [])
+        response, conversation_history = self.tool_agent.chat_with_tool(conversation_history, tools_list = self.tools_list)
 
-            if not response.message.tool_calls :
-                print("Retrying innovation because no retrieval was triggered.")
-
-                if i ==0:
-                    conversation_history.append(response.message)
-                    conversation_history.append({"role":"user", "content" : "You FAILED to call the tool 'retrieve_data_tool'. **This is mantadory as you need to call it to get data for innovation creation.** Make sure to call the tool. "})
-
-            else:
-                break
-
+        if response is None:
+            message_history.append({"role":"assistant", "content" : "Failed to generate innovative work. Please try again."})
+            message_history.append({"role":"user", "content" : "Inform the user that something went wrong on the server side and ask to try again."})
+            response, _ = self.agent.chat(conversation_history)
+            return response
+        
         while response.message.tool_calls:
 
             for tool in response.message.tool_calls:
                 
                 print(f"Running tool : {tool.function.name} with parameters {tool.function.arguments}")
-
                 if tool.function.name == "retrieve_data_tool":
                     print("Retrieving data ...")
 
@@ -527,7 +536,7 @@ class AIAgent():
                 
 
             
-            response, _ = self.tool_agent.chat(conversation_history, format=None, tools = tools_list)
+            response, _ = self.tool_agent.chat(conversation_history, format=None, tools = self.tools_list)
 
         conversation_history.append({'role': 'assistant', 'content':  f" Output :  {response.message.content}"})
         message_history.append({"role":"assistant", "content" : f" Output :  {response.message.content}.\n"})
@@ -564,7 +573,7 @@ class AIAgent():
         """
         innovation_prompt = copy.deepcopy(INNOVATION_TOOL_PROMPT)
         innovation_prompt = innovation_prompt.replace("$TOPICS$", str(topics)).replace("$SEARCH_RESULTS$", "\n".join(sources)).replace("$CRITIC_CONVERSATION_HISTORY$", str(innovation_critic))
-        response, _ = self.innovation_agent.chat([{"role":"user", "content" : innovation_prompt}], format=None, tools = None)
+        response, _ = self.agent.chat([{"role":"user", "content" : innovation_prompt}], format=None, tools = None)
 
         output = f"""Here you have the topics : {str(topics)}
         Here you have the search result : {str_sources}
@@ -721,6 +730,40 @@ class AIAgent():
             "search_result" : str_sources
         }
 
+    def get_available_sections(self, doc_details, sections_review_control, sections_max_review,  doc_supervisor_outputs):
+        """
+        Determine which sections of the document are available for further development or review.
+
+        This function iterates through the document planning details and checks each section against 
+        the review control to decide if it can be worked on or needs further review.
+
+        Args:
+            doc_details (dict): Contains details about the document planning structure with section titles.
+            sections_review_control (dict): Tracks the number of reviews each section has undergone.
+            sections_max_review (int): The maximum number of reviews allowed for any section.
+            available_sections (list): A list to collect titles of sections available for further work.
+            doc_supervisor_outputs (dict): Contains outputs from the document supervisor, used for logging.
+
+        Returns:
+            list: Updated list of sections that are available for further work or review.
+        """
+        available_sections = ["FINISH"]
+        for details in doc_details["planning"]:
+            if details["title"] in sections_review_control:
+                try:
+                    print(f" {details['title']} -> {sections_review_control[details['title']]}/{sections_max_review}")
+                    if sections_review_control[details["title"]] < sections_max_review:
+                        available_sections.append(details["title"])
+ 
+                except Exception as e:
+                    print(f"Failed to append/evaluate {details['title']} final doc : {e}")
+                    print("doc_supervisor_outputs : ",doc_supervisor_outputs)
+
+            else:
+                available_sections.append(details["title"])
+
+        return available_sections
+                
     def doc_supervisor_node(self, state: AgentState):
         """
         This function is responsible for supervising the document creation process.
@@ -759,37 +802,17 @@ class AIAgent():
 
 
         if 'next_section' in doc_supervisor_outputs:
-            prompt = """
-            Criticize and evaluate the latest sections written according to their defined objectives in the plan. If any section does not meet the objectives, select the SAME section again for refinement and add an 1-2 sentences observation about what could be improved. Be specific in your observation, pointing out the issues. 
-            If no critical improvements needed, select the next section to be written and add its respective objectives according to the provided plan.
-            """
-            
             last_section_id = doc_supervisor_outputs['next_section']
             print(f"The supervisor is evaluating the {last_section_id} and deciding what to do next...")
-            prompt = prompt + f"\n\n Here you have the last section '{last_section_id}' results : {doc_supervisor_outputs[last_section_id]['results']}"
+            prompt = NEXT_SECTION_PROMPT + f"\n\n Here you have the last section '{last_section_id}' results : {doc_supervisor_outputs[last_section_id]['results']}"
         else : 
-            prompt = """
-            Select the next section to be written and add its respective objectives according to the provided plan.
-            """
+            last_section_id = None
+            prompt = "Select the next section to be written and add its respective objectives according to the provided plan."
 
         doc_supervisor_history.append({"role":"user", "content" : prompt})
-
-        available_sections = ["FINISH"]
-
+        
         print(f"Order sections : {doc_details['ordered_sections']}")
-        for details in doc_details["planning"]:
-            if details["title"] in sections_review_control:
-                try:
-                    print(f" {details['title']} -> {sections_review_control[details['title']]}/{sections_max_review}")
-                    if sections_review_control[details["title"]] < sections_max_review:
-                        available_sections.append(details["title"])
- 
-                except Exception as e:
-                    print(f"Failed to append/evaluate {details['title']} final doc : {e}")
-                    print("doc_supervisor_outputs : ",doc_supervisor_outputs)
-
-            else:
-                available_sections.append(details["title"])
+        available_sections = self.get_available_sections(doc_details, sections_review_control, sections_max_review,  doc_supervisor_outputs)
 
         print("Available sections : ",available_sections)
 
@@ -809,7 +832,40 @@ class AIAgent():
         """
 
         doc_supervisor_history.append({"role": "assistant", "content":  output_content})
-        
+        doc_supervisor_outputs, last_section_id, doc_details, final_doc = self.manage_sections_review(doc_supervisor_outputs, last_section_id, router, doc_details, final_doc)
+
+        manage_tasks(task_list, task_def, task_running="doc_supervisor_node", status = cl.TaskStatus.DONE)
+
+        return {
+            "doc_supervisor_history" : doc_supervisor_history,
+            "doc_supervisor_outputs" : doc_supervisor_outputs,
+            "docs_written_sections" : state.get("docs_written_sections", []),
+            "task_list" : task_list,
+            "task_def" : task_def,
+            "doc_details" : doc_details,
+            "final_doc" : final_doc
+        }
+
+    def manage_sections_review(self, doc_supervisor_outputs, last_section_id, router, doc_details, final_doc):
+            
+        """
+        Manage the review process of document sections based on the supervisor's evaluation.
+
+        This function updates the document supervisor outputs with observations for the last section 
+        and sets the next section to be written or refined. It appends completed sections to the final 
+        document if the document creation process is finished.
+
+        Args:
+            doc_supervisor_outputs (dict): Contains outputs from the document supervisor, including section 
+                                        observations and objectives.
+            last_section_id (str): The ID of the last section that was reviewed.
+            router (Router): An instance containing the next section details, objectives, subsections, and observations.
+            doc_details (dict): Contains the document's details, including ordered sections.
+            final_doc (str): The current state of the final document being constructed.
+
+        Returns:
+            tuple: Updated doc_supervisor_outputs, last_section_id, doc_details, and final_doc.
+        """
 
         if "next_section" in doc_supervisor_outputs:
             if last_section_id in doc_supervisor_outputs:
@@ -826,18 +882,8 @@ class AIAgent():
             for details in doc_details['ordered_sections']:
                 if details["title"] in doc_supervisor_outputs:
                     final_doc = final_doc + doc_supervisor_outputs[details["title"]]['results']+"\n\n"
-
-        manage_tasks(task_list, task_def, task_running="doc_supervisor_node", status = cl.TaskStatus.DONE)
-
-        return {
-            "doc_supervisor_history" : doc_supervisor_history,
-            "doc_supervisor_outputs" : doc_supervisor_outputs,
-            "docs_written_sections" : state.get("docs_written_sections", []),
-            "task_list" : task_list,
-            "task_def" : task_def,
-            "doc_details" : doc_details,
-            "final_doc" : final_doc
-        }
+        
+        return doc_supervisor_outputs, last_section_id, doc_details, final_doc
 
     def evaluate_doc_content(self, state: AgentState):
         """
@@ -975,3 +1021,81 @@ def update_conversation_history(msg):
     cl.user_session.set("resume_history", resume_history)
 
 
+async def process_event_stream(event, msg, doc_stream, innovation_stream, DOCUMENT_ROOT_PATH):
+
+    if "event" in event :
+        
+
+        doc_node = "doc_supervisor_node"#"doc_writer_node"
+        if event["event"] == "on_chain_stream":
+
+            if "data" in event:
+                if "chunk" in event["data"]:
+                    if "conversational_node" in event["data"]["chunk"]:
+                        if "messages" in event["data"]["chunk"]["conversational_node"]:
+                            messages = event["data"]["chunk"]["conversational_node"]["messages"]
+                            sources = event["data"]["chunk"]["conversational_node"]["sources"]
+                            if len(messages)> 0 :
+                                if "content" in messages[-1]:
+                                    final_msg = messages[-1]["content"]
+                                        
+                                    print("Final answer : ", final_msg)
+                                    if final_msg:
+                                        if innovation_stream :
+                                            msg.content = ""
+                                            await msg.update()
+                                            innovation_stream = False
+
+                                        for token in final_msg:
+                                            try:
+                                                await msg.stream_token(token)
+                                            except Exception as e:
+                                                print(f"Failed to retrieve the token {token}. {e}")
+                                        
+                                        return True, doc_stream, msg, innovation_stream
+                                    
+                    elif doc_node in event["data"]["chunk"]:
+                        if "doc_supervisor_outputs" in event["data"]["chunk"][doc_node]:
+                            docs_written_sections = event["data"]["chunk"][doc_node]["docs_written_sections"]
+                            final_doc = event["data"]["chunk"][doc_node]["final_doc"]
+                            doc_details= event["data"]["chunk"][doc_node]["doc_details"]
+                            doc_title = doc_details["doc_title"]
+
+                            print("docs_written_sections ->",docs_written_sections)
+                            print("final_doc ->",final_doc)
+                            if len(docs_written_sections)> 0 and final_doc != "" :
+                                if doc_stream :
+                                    msg.content = ""
+                                    await msg.update()
+
+                                doc_path = f"{DOCUMENT_ROOT_PATH}/{doc_title.strip().replace(' ','_')}.pdf"
+                                print(f" Creating file : {doc_path}")
+                                
+
+                                normalized_title = unicodedata.normalize("NFKC", doc_title)
+                                normalized_content = unicodedata.normalize("NFKC", final_doc)
+                                    # Create PDF with Unicode support
+                                pdf = FPDF()
+                                pdf.set_auto_page_break(auto=True, margin=15)
+                                
+                                pdf.add_page()
+                                
+                                # Use DejaVu font for Unicode support
+                                pdf.set_font("Arial", "B", 16)  # Bold font for title
+                                pdf.multi_cell(0, 10, normalized_title)  # Add title
+                                pdf.ln(10)  # Add space after title
+                                
+
+                                pdf.set_font("Arial", size=12)  # Regular font for content
+                                pdf.multi_cell(0, 10, normalized_content, 0, 'L', False)
+                                pdf.output(doc_path, "F")
+
+                                for token in final_doc:
+                                    try:
+                                        await msg.stream_token(token)
+                                    except Exception as e:
+                                        print(f"Failed to retrieve the token {token}. {e}")
+                                
+                                return False, doc_stream, msg, innovation_stream
+
+    return False, doc_stream, msg, innovation_stream

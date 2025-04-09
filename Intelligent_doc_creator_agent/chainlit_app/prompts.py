@@ -179,25 +179,20 @@ INTENT_TRACKING = {
     "SELECT_FROM_OPTIONS" : "\nSummarize the created work.",
     "NORMAL_CONVERSATION" : """
     If the user is requesting for something different from guidance to create a document, inform the user that you are an agent specifialized in guidance for document creation.
-    If some information is missing on the user's input ask the user to provide it. This includes missing topics/subjects of the documents.
+    If some information is missing on the user's input ask the user to provide it. This includes missing subjects/subjects of the documents.
     If the user's input is not clear, ask for clarification."""
 }
 
 
 
-DOCUMENT_INTENT_PROMPT = """You are analyzing user intent in a conversation about document creation.
+DOCUMENT_INTENT_SYSTEM_PROMPT = """You are analyzing user intent in a conversation about document creation.
 You are classifying the user intent to help an agent determine how to proceed with the conversation.
 This agent is only capable of conversational interaction and creating documents. IT DOES NOT CREATE ANYTHING APART FROM DOCUMENTS.
-
-Input information:
-- Conversation history: $CONVERSATION_HISTORY$
-- Current user input: $USER_INPUT$
-- Previous classified intent critiques to be considered for refinement: $INTENT_CRITIQUE$
 
 Definitions:
 - "Document" refers to a structured piece of content with a clear purpose, such as a Research paper, MSc thesis, PhD Thesis, or some academic type of document.
 - "Explicit request" means the user has clearly indicated they want a document created using phrases like "create," "write," "draft," "make," "generate," or direct mention of document types.
-- "Specific topic" means a clearly defined subject matter that provides sufficient context for document creation AND is suitable for academic exploration in a research paper, thesis, or scholarly document. Phrases like "about" or "regarding" without an actual subject are NOT considered topics.
+- "Specific subject" means a clearly defined subject matter that provides sufficient context for document creation AND is suitable for academic exploration in a research paper, thesis, or scholarly document. Phrases like "about" or "regarding" without an actual subject are NOT considered topics.
 
 Classification Rules (in order of precedence):
 1. If the user is selecting or referring to a specific option from a previously provided list → 'SELECT_FROM_OPTIONS'
@@ -205,25 +200,25 @@ Classification Rules (in order of precedence):
    - The selection must reference a specific item from a list presented in the conversation history
    - Include any modifications the user requests to the selected option in your reasoning
 
-2. If the user explicitly requests document creation AND provides a specific topic → 'DOCUMENT_REQUEST_WITH_TOPIC'
+2. If the user explicitly requests document creation AND provides a specific subject → 'DOCUMENT_REQUEST_WITH_TOPIC'
    - Example: "Create a document about renewable energy" or "Write a thesis on quantum computing"
-   - The topic must be clearly identifiable, specific enough to create academic content around, and appropriate for research papers, theses, or scholarly documents
+   - The subject must be clearly identifiable, specific enough to create academic content around, and appropriate for research papers, theses, or scholarly documents
    - Incomplete requests like "I want to create a document about" with no specific subject after "about" do NOT qualify
-   - Non-academic topics that wouldn't be suitable for research papers or theses do NOT qualify
-   - Extract the exact topic in your reasoning (not just the prepositions like "about" or "on")
+   - Non-academic subjects that wouldn't be suitable for research papers or theses do NOT qualify
+   - Extract the exact subject in your reasoning (not just the prepositions like "about" or "on")
 
 3. If the user's input is conversational, unclear, incomplete, or does not contain an explicit document request → 'NORMAL_CONVERSATION'
    - Example: "Tell me more" or "What options do you have?" or "asdasdojkçln"
    - This is the default classification if neither of the above criteria are met
    - IMPORTANT: Requests that start a document request but don't complete it (e.g., "Create a document about" with nothing following) should be classified here
-   - Requests for documents about topics not suitable for academic research should be classified here
+   - Requests for documents about subjects not suitable for academic research should be classified here
 
 Handling Ambiguous Cases:
 - If the user combines multiple intents (e.g., selects an option AND requests a new document), select 'NORMAL_CONVERSATION' and ask for clarification on what exactly they want, as it is not really clear.
-- If unsure whether a topic is specific enough or academically appropriate, classify as 'NORMAL_CONVERSATION' and note this in your reasoning
+- **IMPORTANT**: If unsure whether a topic/subject is specific enough or academically appropriate, classify as 'NORMAL_CONVERSATION' and note this in your reasoning
 - Consider any $INTENT_CRITIQUE$ to refine your understanding of edge cases in this specific conversation
-- Be careful to distinguish between prepositions/connecting words and actual topics (e.g., "about," "regarding," "on" are not topics by themselves)
-- Never EVER assume a topic that was not explicitly specified.
+- Be careful to distinguish between prepositions/connecting words and actual subjects (e.g., "about," "regarding," "on" are not subjects by themselves)
+- Never EVER assume a subject that was not explicitly specified.
 
 Before giving your final answer, provide your step-by-step reasoning that explicitly addresses each classification possibility.
 
@@ -231,7 +226,19 @@ Response format:
 CLASSIFICATION: [CATEGORY_NAME]
 REASONING: [Your step-by-step analysis that considers each classification option]"""
 
+DOCUMENT_INTENT_PROMPT = """
+        Input information:
+        - Conversation history with the user: $CONVERSATION_HISTORY$
+        - Current user input: $USER_INPUT$
+        - Previous classified intent critiques to be considered for refinement: $INTENT_CRITIQUE$
+        
+        Now, classify the user intent following strictly the provided instructions."""
 
+RETRIEVER_TOOL_FAILED_MESSAGE = "You FAILED to call the tool 'retrieve_data_tool'. **This is mantadory as you need to call it to get data for innovation creation.** Make sure to call the tool. "
+NEXT_SECTION_PROMPT = """
+            Criticize and evaluate the latest sections written according to their defined objectives in the plan. If any section does not meet the objectives, select the SAME section again for refinement and add an 1-2 sentences observation about what could be improved. Be specific in your observation, pointing out the issues. 
+            If no critical improvements needed, select the next section to be written and add its respective objectives according to the provided plan.
+            """
 INTENT_CRITIQUE_PROMPT = """Perform a step-by-step in-depth analysis of the intent classifier's output based on the user's input and conversation context.
 Your goal is to validate correctness, identify errors, provide a substantive critique, and score the intent classifier's performance.
 
@@ -245,19 +252,19 @@ Input information:
    - Must reference a specific item from a list in the conversation history
    - Should capture any requested modifications to the selected option
 
-2. If the user explicitly requests document creation AND provides a specific topic → 'DOCUMENT_REQUEST_WITH_TOPIC'
-   - Must contain clear document creation language AND an identifiable topic
-   - The topic must be specific enough to create content around
-   - The topic must be suitable for academic exploration in a research paper, thesis, or scholarly document
-   - Prepositions and connecting words (e.g., "about," "on," "regarding") without an actual subject are NOT topics
+2. If the user explicitly requests document creation AND provides a specific subject → 'DOCUMENT_REQUEST_WITH_TOPIC'
+   - Must contain clear document creation language AND an identifiable subject
+   - The subject must be specific enough to create content around
+   - The subject must be suitable for academic exploration in a research paper, thesis, or scholarly document
+   - Prepositions and connecting words (e.g., "about," "on," "regarding") without an actual subject are NOT subjects
    - Incomplete phrases like "Create a document about" with nothing following should NOT qualify
-   - Non-academic topics that wouldn't be suitable for research papers or theses should NOT qualify
-   - Never EVER assume a topic that was not explicitly specified.
+   - Non-academic subjects that wouldn't be suitable for research papers or theses should NOT qualify
+   - Never EVER assume a subject that was not explicitly specified.
 
 3. If the user's input is conversational, unclear, incomplete, ambiguous or lacks an explicit document request → 'NORMAL_CONVERSATION'
    - This is the default classification when criteria for other categories aren't fully met
-   - Includes incomplete document requests where the topic is missing or unclear
-   - Includes requests for documents on non-academic topics
+   - Includes incomplete document requests where the subject is missing or unclear
+   - Includes requests for documents on non-academic subjects
 
 ---
 
@@ -265,22 +272,24 @@ Input information:
 Evaluate the intent classifier's output on these specific dimensions:
 1. **Classification Accuracy**: Is the final classification correct based on the updated rules?
 2. **Reasoning Process**: Did the classifier follow proper steps and consider all classification options?
-3. **Topic/Option Extraction**: Was the correct topic or selected option accurately identified?
-   - Did the classifier distinguish between actual topics and connecting words/prepositions?
-   - Did the classifier verify that the topic is suitable for academic research?
+3. **Subject/Option Extraction**: Was the correct subject/topic or selected option accurately identified?
+   - Did the classifier distinguish between actual topics/subjects and connecting words/prepositions? (MANDATORY)
+   - Did the classifier verify that the subject is suitable for academic research?
+   - Is the extracted subject specific enough to create content around?
+   - Didn't the classifier assumed or infered a missing/wrong subject/topic or option? 
 4. **Edge Case Handling**: Did the classifier appropriately handle ambiguity, incomplete requests, or mixed intents?
 
 ---
 
 ### **Scoring Guidelines (0-100%)**
 - **90-100%** = Correct classification WITH complete, accurate reasoning and proper extraction
-  - Example: Right category, followed all steps, correctly identified topic/option
+  - Example: Right category, followed all steps, correctly identified subject/option
   
 - **75-89%** = Correct classification WITH partial reasoning or minor extraction issues
-  - Example: Right category, followed most steps, but missed nuances in topic/option extraction
+  - Example: Right category, followed most steps, but missed nuances in subject/option extraction
   
 - **50-74%** = Correct classification BUT significant reasoning errors OR incorrect extraction
-  - Example: Right category, but skipped important analysis steps or extracted wrong topic
+  - Example: Right category, but skipped important analysis steps or extracted wrong subject
   
 - **25-49%** = Incorrect classification BUT reasonable reasoning process
   - Example: Wrong category, but the reasoning shows understanding of most relevant factors
@@ -291,14 +300,283 @@ Evaluate the intent classifier's output on these specific dimensions:
 ---
 
 ### **Common Error Cases to Watch For**
-- Mistaking prepositions or connecting words ("about," "regarding," "on") as the actual topic
-- Classifying incomplete requests as 'DOCUMENT_REQUEST_WITH_TOPIC' when no specific topic is provided
+- Mistaking prepositions or connecting words ("about," "regarding," "on") as the actual subject
+- Classifying incomplete requests as 'DOCUMENT_REQUEST_WITH_TOPIC' when no specific subject is provided
 - Failing to identify incomplete user inputs that need clarification
-- Accepting non-academic topics that wouldn't be suitable for research papers or theses
+- Accepting non-academic subjects that wouldn't be suitable for research papers or theses
 
 ---
 
 ### **Output Format**
 observation: [DETAILED CRITIQUE addressing each evaluation criterion and explaining specific strengths/weaknesses]
 recommendations: [SPECIFIC SUGGESTIONS for improving the intent classification process]
-score: [0-100]"""
+score: [0-100]
+
+Here you have the **Intent classifier** output and reasoning : $INTENT_CLASSIFIER_OUTPUT$
+Now, perform an in-depth evaluation and provide your critique.
+
+"""
+
+# # DOCUMENT_INTENT_PROMPT = """You are analyzing user intent in a conversation about document creation. 
+# # You are analyzing and classifying the user intent to help an agent to determine how to proceed with the conversation. 
+# # This agent is only capable of conversational interaction and creating documents. IT DOES NOT CREATE ANYTHING APART FROM DOCUMENTS. 
+
+# # Input information:
+# # - Conversation history: $CONVERSATION_HISTORY$
+# # - Current user input: $USER_INPUT$
+# # - Previous classified intent critiques to be considered for refinment: $INTENT_CRITIQUE$
+
+# # Classification Rules:
+# # - If the user's input is just conversational or it is not clear what the user meant or the input seems incomplete or did not explicitly request document creation → 'NORMAL_CONVERSATION'
+# # - If the user is selecting an innovation from a list that was provided earlier and you can extract the selected option → 'SELECT_FROM_OPTIONS'
+# # - If the user provides a topic for document creation and you can extract the exact topic → 'DOCUMENT_REQUEST_WITH_TOPIC'
+
+# # First, check if any document options/innovations list was provided in the context (conversation history). 
+# # - If there is a list, then check if the user is selecting one of the options.
+# # Then, determine if the user is explicitly requesting document creation.
+# # - If YES, check if the user has specified a topic .
+
+# # Before giving your final answer, provide your step-by-step reasoning.
+
+# # Response format:
+# # CLASSIFICATION: [CATEGORY_NAME]
+# # REASONING: [Your step-by-step analysis]
+# # """
+
+# DOCUMENT_INTENT_PROMPT = """You are analyzing user intent in a conversation about document creation.
+# You are classifying the user intent to help an agent determine how to proceed with the conversation.
+# This agent is only capable of conversational interaction and creating documents. IT DOES NOT CREATE ANYTHING APART FROM DOCUMENTS.
+
+# Input information:
+# - Conversation history: $CONVERSATION_HISTORY$
+# - Current user input: $USER_INPUT$
+# - Previous classified intent critiques to be considered for refinement: $INTENT_CRITIQUE$
+
+# Definitions:
+# - "Document" refers to a structured piece of content with a clear purpose, such as a Research paper, MSc thesis, PhD Thesis, or some academic type of document.
+# - "Explicit request" means the user has clearly indicated they want a document created using phrases like "create," "write," "draft," "make," "generate," or direct mention of document types.
+# - "Specific topic" means a clearly defined subject matter that provides sufficient context for document creation. Phrases like "about" or "regarding" without an actual subject are NOT considered topics.
+
+# Classification Rules (in order of precedence):
+# 1. If the user is selecting or referring to a specific option from a previously provided list → 'SELECT_FROM_OPTIONS'
+#    - Example: "I like option 2" or "Let's go with the third innovation idea"
+#    - The selection must reference a specific item from a list presented in the conversation history
+#    - Include any modifications the user requests to the selected option in your reasoning
+
+# 2. If the user explicitly requests document creation AND provides a specific topic → 'DOCUMENT_REQUEST_WITH_TOPIC'
+#    - Example: "Create a document about renewable energy" or "Write a report on market trends"
+#    - The topic must be clearly identifiable and specific enough to create content around
+#    - Incomplete requests like "I want to create a document about" with no specific subject after "about" do NOT qualify
+#    - Extract the exact topic in your reasoning (not just the prepositions like "about" or "on")
+
+# 3. If the user's input is conversational, unclear, incomplete, or does not contain an explicit document request → 'NORMAL_CONVERSATION'
+#    - Example: "Tell me more" or "What options do you have?" or "asdasdojkçln"
+#    - This is the default classification if neither of the above criteria are met
+#    - IMPORTANT: Requests that start a document request but don't complete it (e.g., "Create a document about" with nothing following) should be classified here
+
+
+# Handling Ambiguous Cases:
+# - If the user combines multiple intents (e.g., selects an option AND requests a new document), selects 'NORMAL_CONVERSATION' and asks for clarification on what exactly they want, as it is not really clear. 
+# - If unsure whether a topic is specific enough, classify as 'NORMAL_CONVERSATION' and note this in your reasoning
+# - Consider any $INTENT_CRITIQUE$ to refine your understanding of edge cases in this specific conversation
+# - Be careful to distinguish between prepositions/connecting words and actual topics (e.g., "about," "regarding," "on" are not topics by themselves)
+
+# Before giving your final answer, provide your step-by-step reasoning that explicitly addresses each classification possibility.
+
+# Response format:
+# CLASSIFICATION: [CATEGORY_NAME]
+# REASONING: [Your step-by-step analysis that considers each classification option]"""
+
+# # INTENT_CRITIQUE_PROMPT = """Perform a step-by-step in-depth analysis of the user's input and the context  
+# # After that, analyze the classification output from the **intent classifier**. Your goal is to **validate correctness**, identify errors, provide a critique and provide a score to the **intent classifier**, using all the available information.
+# # The score represents your level of agreement with the **intent classifier**.
+
+# # ---
+# # ### **Classification Rules** (For reference)
+# # - If the user's input is just conversational or it is not clear what the user meant or the input seems incomplete or did not explicitly request document creation → 'NORMAL_CONVERSATION'.
+# # - If the user is selecting an innovation from a list and you can extract the selected option → 'SELECT_FROM_OPTIONS'.  
+# # - If the user provides a topic for document creation and you can extract the exact topic → 'DOCUMENT_REQUEST_WITH_TOPIC'.  
+
+# # ---
+
+# # ### **Follow These Instructions**
+# # 1️⃣ **Analyze the user input and the  context .**  
+# # 2️⃣ **Compare your analysis with the intent classifier's classification.**  
+# # 3️⃣ **Identify and explain any mistakes, inconsistencies, or misclassifications.**  
+# # 4️⃣ **Provide a score based on accuracy (0-100%).** 
+# # ---
+
+# # ### **Scoring Rules (0-100%)**  
+# # - **90-100%** = Perfect classification, fully correct.  
+# # - **75-89%** = Almost perfect, minor details missing.  
+# # - **50-74%** = Partially correct but flawed.  
+# # - **0-49%** = Completely wrong classification.  
+
+# # ---
+
+# # ### **Output Format**
+# # observation: [DETAILED CRITIQUE IDENTIFYING ERRORS OR CONFIRMING ACCURACY]
+# # score: [0-100]
+# # """
+
+# INTENT_CRITIQUE_PROMPT = """Perform a step-by-step in-depth analysis of the intent classifier's output based on the user's input and conversation context.
+# Your goal is to validate correctness, identify errors, provide a substantive critique, and score the intent classifier's performance.
+
+# ---
+# ### **Updated Classification Rules** (For reference)
+# 1. If the user is selecting or referring to a specific option from a previously provided list → 'SELECT_FROM_OPTIONS'
+#    - Must reference a specific item from a list in the conversation history
+#    - Should capture any requested modifications to the selected option
+
+
+# 2. If the user explicitly requests document creation AND provides a specific topic → 'DOCUMENT_REQUEST_WITH_TOPIC'
+#    - Must contain clear document creation language AND an identifiable topic
+#    - The topic must be specific enough to create content around
+#    - Prepositions and connecting words (e.g., "about," "on," "regarding") without an actual subject are NOT topics
+#    - Incomplete phrases like "Create a document about" with nothing following should NOT qualify
+
+# 3. If the user's input is conversational, unclear, incomplete, ambiguous or lacks an explicit document request → 'NORMAL_CONVERSATION'
+#    - This is the default classification when criteria for other categories aren't fully met
+#    - Includes incomplete document requests where the topic is missing or unclear
+
+# ---
+
+# ### **Evaluation Criteria**
+# Evaluate the intent classifier's output on these specific dimensions:
+# 1. **Classification Accuracy**: Is the final classification correct based on the updated rules?
+# 2. **Reasoning Process**: Did the classifier follow proper steps and consider all classification options?
+# 3. **Topic/Option Extraction**: Was the correct topic or selected option accurately identified?
+#    - Did the classifier distinguish between actual topics and connecting words/prepositions?
+# 4. **Edge Case Handling**: Did the classifier appropriately handle ambiguity, incomplete requests, or mixed intents?
+
+
+# ---
+
+# ### **Scoring Guidelines (0-100%)**
+# - **90-100%** = Correct classification WITH complete, accurate reasoning and proper extraction
+#   - Example: Right category, followed all steps, correctly identified topic/option
+  
+# - **75-89%** = Correct classification WITH partial reasoning or minor extraction issues
+#   - Example: Right category, followed most steps, but missed nuances in topic/option extraction
+  
+# - **50-74%** = Correct classification BUT significant reasoning errors OR incorrect extraction
+#   - Example: Right category, but skipped important analysis steps or extracted wrong topic
+  
+# - **25-49%** = Incorrect classification BUT reasonable reasoning process
+#   - Example: Wrong category, but the reasoning shows understanding of most relevant factors
+  
+# - **0-24%** = Incorrect classification AND flawed reasoning process
+#   - Example: Wrong category with missing steps or completely misunderstood user intent
+
+# ---
+
+# ### **Output Format**
+# observation: [DETAILED CRITIQUE addressing each evaluation criterion and explaining specific strengths/weaknesses]
+# recommendations: [SPECIFIC SUGGESTIONS for improving the intent classification process]
+# score: [0-100]"""
+
+
+# DOCUMENT_INTENT_PROMPT = """You are analyzing user intent in a conversation about document creation.
+# You are classifying the user intent to help an agent determine how to proceed with the conversation.
+# This agent is only capable of conversational interaction and creating documents. IT DOES NOT CREATE ANYTHING APART FROM DOCUMENTS.
+
+# Input information:
+# - Conversation history: $CONVERSATION_HISTORY$
+# - Current user input: $USER_INPUT$
+# - Previous classified intent critiques to be considered for refinement: $INTENT_CRITIQUE$
+
+# Definitions:
+# - "Document" refers to a structured piece of content with a clear purpose, such as a Research paper, MSc thesis, PhD Thesis, or some academic type of document.
+# - "Explicit request" means the user has clearly indicated they want a document created using phrases like "create," "write," "draft," "make," "generate," or direct mention of document types.
+# - "Specific topic" means a clearly defined subject matter that provides sufficient context for document creation. Phrases like "about" or "regarding" without an actual subject are NOT considered topics.
+
+# Classification Rules (in order of precedence):
+# 1. If the user is selecting or referring to a specific option from a previously provided list → 'SELECT_FROM_OPTIONS'
+#    - Example: "I like option 2" or "Let's go with the third innovation idea"
+#    - The selection must reference a specific item from a list presented in the conversation history
+#    - Include any modifications the user requests to the selected option in your reasoning
+
+# 2. If the user explicitly requests document creation AND provides a specific topic → 'DOCUMENT_REQUEST_WITH_TOPIC'
+#    - Example: "Create a document about renewable energy" or "Write a report on market trends"
+#    - The topic must be clearly identifiable and specific enough to create content around
+#    - Incomplete requests like "I want to create a document about" with no specific subject after "about" do NOT qualify
+#    - Extract the exact topic in your reasoning (not just the prepositions like "about" or "on")
+
+# 3. If the user's input is conversational, unclear, incomplete, or does not contain an explicit document request → 'NORMAL_CONVERSATION'
+#    - Example: "Tell me more" or "What options do you have?" or "asdasdojkçln"
+#    - This is the default classification if neither of the above criteria are met
+#    - IMPORTANT: Requests that start a document request but don't complete it (e.g., "Create a document about" with nothing following) should be classified here
+
+# Handling Ambiguous Cases:
+# - If the user combines multiple intents (e.g., selects an option AND requests a new document), select 'NORMAL_CONVERSATION' and ask for clarification on what exactly they want, as it is not really clear.
+# - If unsure whether a topic is specific enough, classify as 'NORMAL_CONVERSATION' and note this in your reasoning
+# - Consider any $INTENT_CRITIQUE$ to refine your understanding of edge cases in this specific conversation
+# - Be careful to distinguish between prepositions/connecting words and actual topics (e.g., "about," "regarding," "on" are not topics by themselves)
+
+# Before giving your final answer, provide your step-by-step reasoning that explicitly addresses each classification possibility.
+
+# Response format:
+# CLASSIFICATION: [CATEGORY_NAME]
+# REASONING: [Your step-by-step analysis that considers each classification option]"""
+
+
+# INTENT_CRITIQUE_PROMPT = """Perform a step-by-step in-depth analysis of the intent classifier's output based on the user's input and conversation context.
+# Your goal is to validate correctness, identify errors, provide a substantive critique, and score the intent classifier's performance.
+
+# ---
+# ### **Updated Classification Rules** (For reference)
+# 1. If the user is selecting or referring to a specific option from a previously provided list → 'SELECT_FROM_OPTIONS'
+#    - Must reference a specific item from a list in the conversation history
+#    - Should capture any requested modifications to the selected option
+
+# 2. If the user explicitly requests document creation AND provides a specific topic → 'DOCUMENT_REQUEST_WITH_TOPIC'
+#    - Must contain clear document creation language AND an identifiable topic
+#    - The topic must be specific enough to create content around
+#    - Prepositions and connecting words (e.g., "about," "on," "regarding") without an actual subject are NOT topics
+#    - Incomplete phrases like "Create a document about" with nothing following should NOT qualify
+
+# 3. If the user's input is conversational, unclear, incomplete, ambiguous or lacks an explicit document request → 'NORMAL_CONVERSATION'
+#    - This is the default classification when criteria for other categories aren't fully met
+#    - Includes incomplete document requests where the topic is missing or unclear
+
+# ---
+
+# ### **Evaluation Criteria**
+# Evaluate the intent classifier's output on these specific dimensions:
+# 1. **Classification Accuracy**: Is the final classification correct based on the updated rules?
+# 2. **Reasoning Process**: Did the classifier follow proper steps and consider all classification options?
+# 3. **Topic/Option Extraction**: Was the correct topic or selected option accurately identified?
+#    - Did the classifier distinguish between actual topics and connecting words/prepositions?
+# 4. **Edge Case Handling**: Did the classifier appropriately handle ambiguity, incomplete requests, or mixed intents?
+
+# ---
+
+# ### **Scoring Guidelines (0-100%)**
+# - **90-100%** = Correct classification WITH complete, accurate reasoning and proper extraction
+#   - Example: Right category, followed all steps, correctly identified topic/option
+  
+# - **75-89%** = Correct classification WITH partial reasoning or minor extraction issues
+#   - Example: Right category, followed most steps, but missed nuances in topic/option extraction
+  
+# - **50-74%** = Correct classification BUT significant reasoning errors OR incorrect extraction
+#   - Example: Right category, but skipped important analysis steps or extracted wrong topic
+  
+# - **25-49%** = Incorrect classification BUT reasonable reasoning process
+#   - Example: Wrong category, but the reasoning shows understanding of most relevant factors
+  
+# - **0-24%** = Incorrect classification AND flawed reasoning process
+#   - Example: Wrong category with missing steps or completely misunderstood user intent
+
+# ---
+
+# ### **Common Error Cases to Watch For**
+# - Mistaking prepositions or connecting words ("about," "regarding," "on") as the actual topic
+# - Classifying incomplete requests as 'DOCUMENT_REQUEST_WITH_TOPIC' when no specific topic is provided
+# - Failing to identify incomplete user inputs that need clarification
+
+# ---
+
+# ### **Output Format**
+# observation: [DETAILED CRITIQUE addressing each evaluation criterion and explaining specific strengths/weaknesses]
+# recommendations: [SPECIFIC SUGGESTIONS for improving the intent classification process]
+# score: [0-100]"""

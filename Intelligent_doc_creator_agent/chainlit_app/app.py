@@ -162,22 +162,22 @@ async def start():
 
     semantic_retriever = index.as_retriever(similarity_top_k=50)
     
-    sparse_retriever= index.as_retriever(
-        vector_store_query_mode="sparse", sparse_top_k=10
-        )
+    # sparse_retriever= index.as_retriever(
+    #     vector_store_query_mode="sparse", sparse_top_k=10
+    #     )
 
-    fusion_retriever = QueryFusionRetriever(
-            [semantic_retriever],#, sparse_retriever],
-            similarity_top_k=20,
-            num_queries=2,  # set this to 1 to disable query generation
-            mode="relative_score",
-            use_async=True,
-        )
-    response_synthesizer = CompactAndRefine()
-    query_engine = RetrieverQueryEngine(
-        retriever=fusion_retriever,
-        response_synthesizer=response_synthesizer,
-    )
+    # fusion_retriever = QueryFusionRetriever(
+    #         [semantic_retriever],#, sparse_retriever],
+    #         similarity_top_k=20,
+    #         num_queries=2,  # set this to 1 to disable query generation
+    #         mode="relative_score",
+    #         use_async=True,
+    #     )
+    # response_synthesizer = CompactAndRefine()
+    # query_engine = RetrieverQueryEngine(
+    #     retriever=fusion_retriever,
+    #     response_synthesizer=response_synthesizer,
+    # )
     retriever = semantic_retriever
     # Use the index as a retriever
     
@@ -347,22 +347,22 @@ async def on_chat_resume(thread: ThreadDict):
 
     semantic_retriever = index.as_retriever(similarity_top_k=50)
     
-    sparse_retriever= index.as_retriever(
-        vector_store_query_mode="sparse", sparse_top_k=10
-        )
+    # sparse_retriever= index.as_retriever(
+    #     vector_store_query_mode="sparse", sparse_top_k=10
+    #     )
 
-    fusion_retriever = QueryFusionRetriever(
-            [semantic_retriever],#, sparse_retriever],
-            similarity_top_k=20,
-            num_queries=2,  # set this to 1 to disable query generation
-            mode="relative_score",
-            use_async=True,
-        )
-    response_synthesizer = CompactAndRefine()
-    query_engine = RetrieverQueryEngine(
-        retriever=fusion_retriever,
-        response_synthesizer=response_synthesizer,
-    )
+    # fusion_retriever = QueryFusionRetriever(
+    #         [semantic_retriever],#, sparse_retriever],
+    #         similarity_top_k=20,
+    #         num_queries=2,  # set this to 1 to disable query generation
+    #         mode="relative_score",
+    #         use_async=True,
+    #     )
+    # response_synthesizer = CompactAndRefine()
+    # query_engine = RetrieverQueryEngine(
+    #     retriever=fusion_retriever,
+    #     response_synthesizer=response_synthesizer,
+    # )
     retriever = semantic_retriever
     # Use the index as a retriever
     
@@ -429,7 +429,6 @@ async def main(message: cl.Message):
 
     task_list = cl.TaskList()
     task_list.status = "Running..."
-    task_retries_control = {}
     task_def = {}
     task_process_list = []
     for i, (task_process, description) in enumerate(tasks_definition.items()):
@@ -472,14 +471,13 @@ async def main(message: cl.Message):
     innovation_stream = False
     doc_stream = False
 
-
     try:   
      
         async for event in agent.graph.astream_events({
                     "task": message.content,
                     "messages" : [{"role":"user", "content" : message.content}],
                     "intent_revision_number" : 1,
-                    "intent_max_revisions" : 5,
+                    "intent_max_revisions" : 3,
                     "innovation_revision_number" : 1,
                     "innovation_max_revisions" : 3,
                     "task_list" : task_list,
@@ -490,7 +488,6 @@ async def main(message: cl.Message):
                     thread,
                     version="v1"):
 
-            
             if "event" in event and "name" in event:
 
                 if event["event"] in ["on_chain_start","on_chain_end"] and event["name"] in task_process_list:
@@ -499,80 +496,12 @@ async def main(message: cl.Message):
                     task_list = event["data"]["input"]["task_list"]
                     task_def = event["data"]["input"]["task_def"]
                     await task_list.send()
+                    
+            end, doc_stream, msg, innovation_stream = await process_event_stream(event,  msg, doc_stream, innovation_stream, DOCUMENT_ROOT_PATH)
 
-            if "event" in event :
-                
-
-                doc_node = "doc_supervisor_node"#"doc_writer_node"
-                if event["event"] == "on_chain_stream":
-
-                    if "data" in event:
-                        if "chunk" in event["data"]:
-                            if "conversational_node" in event["data"]["chunk"]:
-                                if "messages" in event["data"]["chunk"]["conversational_node"]:
-                                    messages = event["data"]["chunk"]["conversational_node"]["messages"]
-                                    sources = event["data"]["chunk"]["conversational_node"]["sources"]
-                                    if len(messages)> 0 :
-                                        if "content" in messages[-1]:
-                                            final_msg = messages[-1]["content"]
-                                                
-                                            print("Final answer : ", final_msg)
-                                            if final_msg:
-                                                if innovation_stream :
-                                                    msg.content = ""
-                                                    await msg.update()
-                                                    innovation_stream = False
-
-                                                for token in final_msg:
-                                                    try:
-                                                        await msg.stream_token(token)
-                                                    except Exception as e:
-                                                        print(f"Failed to retrieve the token {token}. {e}")
-                                                
-                                                break
-                            elif doc_node in event["data"]["chunk"]:
-                                if "doc_supervisor_outputs" in event["data"]["chunk"][doc_node]:
-                                    docs_written_sections = event["data"]["chunk"][doc_node]["docs_written_sections"]
-                                    final_doc = event["data"]["chunk"][doc_node]["final_doc"]
-                                    doc_details= event["data"]["chunk"][doc_node]["doc_details"]
-                                    doc_title = doc_details["doc_title"]
-
-                                    print("docs_written_sections ->",docs_written_sections)
-                                    print("final_doc ->",final_doc)
-                                    if len(docs_written_sections)> 0 and final_doc != "" :
-                                        if doc_stream :
-                                            msg.content = ""
-                                            await msg.update()
-
-                                        doc_path = f"{DOCUMENT_ROOT_PATH}/{doc_title.strip().replace(' ','_')}.pdf"
-                                        print(f" Creating file : {doc_path}")
+            if end:
+                break
                                         
-
-                                        normalized_title = unicodedata.normalize("NFKC", doc_title)
-                                        normalized_content = unicodedata.normalize("NFKC", final_doc)
-                                            # Create PDF with Unicode support
-                                        pdf = FPDF()
-                                        pdf.set_auto_page_break(auto=True, margin=15)
-                                        
-                                        pdf.add_page()
-                                        
-                                        # Use DejaVu font for Unicode support
-                                        pdf.set_font("Arial", "B", 16)  # Bold font for title
-                                        pdf.multi_cell(0, 10, normalized_title)  # Add title
-                                        pdf.ln(10)  # Add space after title
-                                        
-
-                                        pdf.set_font("Arial", size=12)  # Regular font for content
-                                        pdf.multi_cell(0, 10, normalized_content, 0, 'L', False)
-                                        pdf.output(doc_path, "F")
-
-                                        for token in final_doc:
-                                            try:
-                                                await msg.stream_token(token)
-                                            except Exception as e:
-                                                print(f"Failed to retrieve the token {token}. {e}")
-                                        
-                        
 
     except Exception as e:
         print("Failed to run the stream : ",e)
@@ -585,7 +514,6 @@ async def main(message: cl.Message):
         task_list.status = "Failed"
         await cl.sleep(0.2)
         await task_list.send()
-
     
 
     sources_update(sources)
